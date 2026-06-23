@@ -1,0 +1,6 @@
+{
+  "activityDtoVersion": "40",
+  "personDtoVersion": "26",
+  "clientId": "evosplit",
+  "_comment": "If a create fails with a version error, or the technician/activity lists stay empty, set the current Activity/Person DTO versions from the FSM API/Query workbench here."
+}

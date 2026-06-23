@@ -1,0 +1,7 @@
+{
+  "name": "evosplit",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Static SAP FSM extension: split a long activity into smaller activities and assign technicians.",
+  "scripts": { "test": "node test/run.js" }
+}

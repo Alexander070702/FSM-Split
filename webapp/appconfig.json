@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "name": "EvoSplit",
+  "provider": "Evora IT Solutions",
+  "description": "Pick a long activity, split it into smaller activities and assign each to a technician.",
+  "contextInfo": ["account","accountId","company","companyId","cloudHost","selectedActivities","selectedServiceCall","user","userId"],
+  "settings": { "extensionAuthType": "FEDERATED", "fullSize": false }
+}

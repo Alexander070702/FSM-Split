@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EvoSplit</title>
+
+  <!-- fsm-shell loaded BEFORE UI5 so its UMD attaches to window.FSMShell -->
+  <script src="https://unpkg.com/fsm-shell@1.20.0/release/fsm-shell-client.js"></script>
+
+  <script
+    id="sap-ui-bootstrap"
+    src="https://sapui5.hana.ondemand.com/resources/sap-ui-core.js"
+    data-sap-ui-theme="sap_horizon"
+    data-sap-ui-libs="sap.m,sap.ui.layout,sap.ui.core"
+    data-sap-ui-compatVersion="edge"
+    data-sap-ui-async="true"
+    data-sap-ui-frameOptions="trusted">
+  </script>
+
+  <script>
+  // ====================================================================
+  // EvoSplit — pick a long activity, split it into smaller activities,
+  // assign each to a technician, create them in one click. Fully static.
+  // ====================================================================
+  sap.ui.getCore().attachInit(function () {
+
+    var JSONModel = sap.ui.model.json.JSONModel;
+    var MessageToast = sap.m.MessageToast;
+    var MessageBox = sap.m.MessageBox;
+
+    var CFG = { activityDtoVersion: "40", personDtoVersion: "26", clientId: "evosplit" };
+    var CTX = null;          // { cloudHost, account, company, token }
+    var inShell = false;
+
+    // ---------- split engine (pure, unit-tested) ----------------------
+    function round(v, d) { d = d == null ? 1 : d; var f = Math.pow(10, d); return Math.round((v + Number.EPSILON) * f) / f; }
+    function distributeByWeight(total, weights, d) {
+      d = d == null ? 1 : d;
+      var sum = weights.reduce(function (a, b) { return a + b; }, 0);
+      if (sum <= 0) throw new Error("Sum of shares must be > 0");
+      var f = Math.pow(10, d);
+      var exact = weights.map(function (w) { return (total * w) / sum; });
+      var floored = exact.map(function (x) { return Math.floor(x * f) / f; });
+      var rem = Math.round((total - floored.reduce(function (a, b) { return a + b; }, 0)) * f);
+      var order = exact.map(function (x, i) { return { i: i, frac: x * f - Math.floor(x * f) }; })
+        .sort(function (a, b) { return b.frac - a.frac; });
+      var res = floored.slice();
+      for (var k = 0; k < order.length && rem > 0; k++) { res[order[k].i] = round(res[order[k].i] + 1 / f, d); rem--; }
+      return res.map(function (x) { return round(x, d); });
+    }
+    function computeSplit(mode, totalWork, parts) {
+      if (!parts.length) throw new Error("Add at least one work package");
+      parts.forEach(function (p, i) { if (!(Number(p.value) > 0)) throw new Error("Row " + (i + 1) + ": value must be > 0"); });
+      var works, total;
+      if (mode === "sequential") {
+        works = parts.map(function (p) { return round(Number(p.value), 1); });
+        total = round(works.reduce(function (a, b) { return a + b; }, 0), 1);
+      } else {
+        total = Number(totalWork);
+        if (!(total > 0)) throw new Error("Percentage mode needs a total work > 0");
+        var pct = parts.reduce(function (a, p) { return a + Number(p.value); }, 0);
+        if (Math.abs(pct - 100) > 0.5) throw new Error("Percentages must sum to 100 (got " + pct + ")");
+        works = distributeByWeight(total, parts.map(function (p) { return Number(p.value); }), 1);
+      }
+      return parts.map(function (p, i) {
+        return {
+          label: p.label || ("Part " + (i + 1)),
+          work: works[i], unit: "H",
+          sharePct: mode === "percentage" ? round(Number(p.value), 2) : round(works[i] / total * 100, 2),
+          technicianId: p.technicianId || "", technicianName: p.technicianName || ""
+        };
+      });
+    }
+    function uuid() { var s = ""; for (var i = 0; i < 32; i++) { s += (Math.random() * 16 | 0).toString(16); } return s.toUpperCase(); }
+
+    // ---------- FSM API ------------------------------------------------
+    function base() { var h = (CTX && CTX.cloudHost) || "eu.fsm.cloud.sap"; return h.indexOf("http") === 0 ? h : "https://" + h; }
+    function headers() { return { "Content-Type": "application/json", "X-Client-ID": CFG.clientId, "X-Client-Version": "1.0.0", "Authorization": "bearer " + (CTX && CTX.token) }; }
+    function firstObj(row) { return row.activity || row.a || row.person || row.p || (row && typeof row === "object" ? row[Object.keys(row)[0]] : row) || row; }
+
+    function createActivity(activity) {
+      var url = base() + "/api/data/v4/Activity?dtos=Activity." + CFG.activityDtoVersion +
+        "&account=" + encodeURIComponent(CTX.account) + "&company=" + encodeURIComponent(CTX.company);
+      return fetch(url, { method: "POST", headers: headers(), body: JSON.stringify(activity) })
+        .then(function (r) {
+          return r.text().then(function (t) {
+            var b; try { b = t ? JSON.parse(t) : {}; } catch (e) { b = { raw: t }; }
+            if (!r.ok) throw new Error("HTTP " + r.status + ": " + ((b && (b.message || (b.error && b.error.message))) || t || r.statusText));
+            return b;
+          });
+        });
+    }
+    function query(coreSQL, dtoRef) {
+      var url = base() + "/api/query/v1?dtos=" + dtoRef;
+      return fetch(url, { method: "POST", headers: headers(), body: JSON.stringify({ query: coreSQL }) })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { return (d && d.data) || []; });
+    }
+    function loadTechnicians() {
+      if (!inShell || !CTX || !CTX.token) return Promise.resolve();
+      return query("SELECT p.id, p.firstName, p.lastName FROM Person p", "Person." + CFG.personDtoVersion)
+        .then(function (rows) {
+          var techs = rows.map(function (it) { var p = firstObj(it); return { id: p.id, name: ((p.firstName || "") + " " + (p.lastName || "")).trim() || p.id }; })
+            .filter(function (t) { return t.id; });
+          if (techs.length) oModel.setProperty("/technicians", techs);
+        }).catch(function () {});
+    }
+    function loadActivities() {
+      if (!inShell || !CTX || !CTX.token) return Promise.resolve();
+      var sc = oModel.getProperty("/serviceCall");
+      var where = sc ? (" WHERE a.serviceCall = '" + sc + "'") : "";
+      var sql = "SELECT a.id, a.code, a.subject, a.durationInMinutes, a.serviceCall FROM Activity a" + where;
+      return query(sql, "Activity." + CFG.activityDtoVersion)
+        .then(function (rows) {
+          var acts = rows.map(function (it) {
+            var a = firstObj(it);
+            var hrs = a.durationInMinutes ? (" — " + round(a.durationInMinutes / 60, 1) + "h") : "";
+            return { id: a.id, serviceCall: a.serviceCall, durationInMinutes: a.durationInMinutes,
+              label: (a.subject || a.code || a.id) + hrs };
+          }).filter(function (a) { return a.id; });
+          oModel.setProperty("/activities", acts);
+          var pre = oModel.getProperty("/sourceActivity");
+          if (pre) applyActivitySelection(pre);
+        }).catch(function () {});
+    }
+
+    // ---------- pure state transitions (exposed for tests) ------------
+    function applyActivitySelection(activityId) {
+      var list = oModel.getProperty("/activities") || [];
+      var a = list.filter(function (x) { return x.id === activityId; })[0];
+      oModel.setProperty("/selectedActivity", activityId);
+      oModel.setProperty("/sourceActivity", activityId);
+      if (a) {
+        if (a.serviceCall) oModel.setProperty("/serviceCall", a.serviceCall);
+        if (a.durationInMinutes) oModel.setProperty("/totalWork", round(a.durationInMinutes / 60, 1));
+      }
+    }
+
+    // ---------- model --------------------------------------------------
+    var oModel = new JSONModel({
+      mode: "sequential", totalWork: 100, serviceCall: "", sourceActivity: "", selectedActivity: "", dryRun: false,
+      technicians: [], activities: [],
+      parts: [
+        { label: "Mechanics", value: 10, technicianId: "", technicianName: "" },
+        { label: "Electrics", value: 30, technicianId: "", technicianName: "" },
+        { label: "Vehicle assembly", value: 40, technicianId: "", technicianName: "" }
+      ]
+    });
+    var oResultModel = new JSONModel({ items: [] });
+
+    // ---------- handlers ----------------------------------------------
+    function recalcTotal() {
+      if (oModel.getProperty("/mode") === "percentage") return;
+      oModel.setProperty("/totalWork", oModel.getProperty("/parts").reduce(function (a, p) { return a + (Number(p.value) || 0); }, 0));
+    }
+    function onModeChange(e) { var k = e.getParameter("item").getKey(); oModel.setProperty("/mode", k); inTotal.setEnabled(k === "percentage"); recalcTotal(); }
+    function onValueChange() { recalcTotal(); }
+    function onAddRow() { var a = oModel.getProperty("/parts"); a.push({ label: "", value: 0, technicianId: "", technicianName: "" }); oModel.setProperty("/parts", a); }
+    function onRemoveRow(e) { var i = Number(e.getSource().getBindingContext().getPath().split("/").pop()); var a = oModel.getProperty("/parts"); a.splice(i, 1); oModel.setProperty("/parts", a); recalcTotal(); }
+    function onActivityChange(e) {
+      var it = e.getSource().getSelectedItem();
+      if (it) { applyActivitySelection(it.getKey()); }
+      else { oModel.setProperty("/sourceActivity", e.getSource().getValue()); }
+    }
+    function onTechChange(e) {
+      var cb = e.getSource(); var bc = cb.getBindingContext(); if (!bc) return; var path = bc.getPath();
+      var item = cb.getSelectedItem();
+      if (item) { oModel.setProperty(path + "/technicianId", item.getKey()); oModel.setProperty(path + "/technicianName", item.getText()); }
+      else { oModel.setProperty(path + "/technicianId", cb.getValue()); oModel.setProperty(path + "/technicianName", cb.getValue()); }
+    }
+    function showResult(items) { oResultModel.setProperty("/items", items); resultPanel.setVisible(true); }
+
+    function onSplit() {
+      var mode = oModel.getProperty("/mode");
+      var dry = oModel.getProperty("/dryRun");
+      var serviceCall = (oModel.getProperty("/serviceCall") || "").trim();
+      var sourceAct = (oModel.getProperty("/sourceActivity") || "").trim();
+      var parts = oModel.getProperty("/parts");
+
+      var pieces;
+      try { pieces = computeSplit(mode, oModel.getProperty("/totalWork"), parts); }
+      catch (err) { MessageBox.warning(err.message); return Promise.resolve(); }
+
+      var willCreate = inShell && CTX && CTX.token && !dry;
+      if (!willCreate) {
+        showResult(pieces.map(function (p) {
+          return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct,
+            technicianName: p.technicianName || "-", ref: inShell ? "(dry run)" : "(standalone)", status: "SUCCESS" };
+        }));
+        MessageToast.show(inShell ? "Dry run — nothing created" : "Standalone — open inside FSM to create");
+        return Promise.resolve();
+      }
+      if (!serviceCall) { MessageBox.warning("Pick an activity (or enter a Service Call ID) first."); return Promise.resolve(); }
+
+      btnSplit.setBusy(true);
+      var tasks = pieces.map(function (p) {
+        var act = {
+          id: uuid(),
+          code: "EVOSPLIT-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
+          subject: p.label + " (" + p.work + " " + p.unit + ")",
+          serviceCall: serviceCall, type: "ASSIGNMENT",
+          durationInMinutes: Math.round(Number(p.work) * 60),
+          remarks: "EvoSplit " + p.sharePct + "%" + (sourceAct ? " | from activity " + sourceAct : "")
+        };
+        if (p.technicianId) act.responsibles = [p.technicianId];
+        if (sourceAct) act.externalId = "EVOSPLIT-" + sourceAct + "-" + p.label.replace(/\s+/g, "");
+        return createActivity(act)
+          .then(function () { return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct, technicianName: p.technicianName || (p.technicianId || "(unassigned)"), ref: act.id, status: "SUCCESS" }; })
+          .catch(function (err) { return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct, technicianName: p.technicianName || "-", ref: "", status: "ERROR: " + err.message }; });
+      });
+      return Promise.all(tasks).then(function (items) {
+        btnSplit.setBusy(false);
+        showResult(items);
+        var ok = items.filter(function (i) { return i.status === "SUCCESS"; }).length;
+        if (ok === items.length) MessageToast.show("Created & assigned " + ok + " activities");
+        else MessageBox.error((items.length - ok) + " of " + items.length + " failed — see the result table");
+        return items;
+      });
+    }
+
+    // ---------- UI (programmatic) -------------------------------------
+    var contextStrip = new sap.m.MessageStrip({ text: "Running standalone (not inside FSM). The split is computed but nothing is created. Open inside the FSM board to create & assign.", type: "Warning", showIcon: true }).addStyleClass("sapUiSmallMarginBottom");
+
+    var cbActivity = new sap.m.ComboBox({
+      selectedKey: "{/selectedActivity}", value: "{/sourceActivity}", placeholder: "pick the long activity to split",
+      selectionChange: onActivityChange, width: "100%",
+      items: { path: "/activities", template: new sap.ui.core.Item({ key: "{id}", text: "{label}" }) }
+    });
+    var inServiceCall = new sap.m.Input({ value: "{/serviceCall}", placeholder: "auto-fills from the chosen activity" });
+    var segMode = new sap.m.SegmentedButton({ selectedKey: "{/mode}", selectionChange: onModeChange, items: [
+      new sap.m.SegmentedButtonItem({ key: "sequential", text: "By hours" }),
+      new sap.m.SegmentedButtonItem({ key: "percentage", text: "By percentage" })
+    ]});
+    var inTotal = new sap.m.Input({ value: "{/totalWork}", type: "Number", enabled: false });
+    var swDry = new sap.m.Switch({ state: "{/dryRun}" });
+
+    var form = new sap.ui.layout.form.SimpleForm({ editable: true, layout: "ResponsiveGridLayout", labelSpanXL: 4, labelSpanL: 4, labelSpanM: 4, content: [
+      new sap.m.Label({ text: "Activity to split" }), cbActivity,
+      new sap.m.Label({ text: "Service Call (ID)" }), inServiceCall,
+      new sap.m.Label({ text: "Split mode" }), segMode,
+      new sap.m.Label({ text: "Total work (h)" }), inTotal,
+      new sap.m.Label({ text: "Dry run (compute only)" }), swDry
+    ]});
+
+    var partsTable = new sap.m.Table({
+      headerToolbar: new sap.m.Toolbar({ content: [ new sap.m.Title({ text: "Work packages" }), new sap.m.ToolbarSpacer(), new sap.m.Button({ icon: "sap-icon://add", text: "Add package", press: onAddRow }) ] }),
+      columns: [
+        new sap.m.Column({ header: new sap.m.Text({ text: "Description" }) }),
+        new sap.m.Column({ hAlign: "End", width: "7rem", header: new sap.m.Text({ text: "Hours / %" }) }),
+        new sap.m.Column({ header: new sap.m.Text({ text: "Technician" }) }),
+        new sap.m.Column({ hAlign: "Center", width: "3.5rem", header: new sap.m.Text({}) })
+      ]
+    });
+    partsTable.bindItems({ path: "/parts", template: new sap.m.ColumnListItem({ cells: [
+      new sap.m.Input({ value: "{label}" }),
+      new sap.m.Input({ value: "{value}", type: "Number", textAlign: "End", liveChange: onValueChange }),
+      new sap.m.ComboBox({ selectedKey: "{technicianId}", value: "{technicianName}", placeholder: "pick or type a Person ID", selectionChange: onTechChange,
+        items: { path: "/technicians", template: new sap.ui.core.Item({ key: "{id}", text: "{name}" }) } }),
+      new sap.m.Button({ icon: "sap-icon://delete", type: "Transparent", press: onRemoveRow })
+    ]})});
+
+    var btnSplit = new sap.m.Button({ text: "Split & assign", type: "Emphasized", icon: "sap-icon://split", press: onSplit }).addStyleClass("sapUiMediumMarginTop");
+
+    var resultTable = new sap.m.Table({ columns: [
+      new sap.m.Column({ header: new sap.m.Text({ text: "Description" }) }),
+      new sap.m.Column({ hAlign: "End", header: new sap.m.Text({ text: "Work" }) }),
+      new sap.m.Column({ hAlign: "End", header: new sap.m.Text({ text: "Share %" }) }),
+      new sap.m.Column({ header: new sap.m.Text({ text: "Technician" }) }),
+      new sap.m.Column({ header: new sap.m.Text({ text: "Activity / status" }) })
+    ]});
+    resultTable.bindItems({ path: "result>/items", template: new sap.m.ColumnListItem({ cells: [
+      new sap.m.Text({ text: "{result>label}" }),
+      new sap.m.ObjectNumber({ number: "{result>work}", unit: "{result>unit}" }),
+      new sap.m.Text({ text: "{result>sharePct}" }),
+      new sap.m.Text({ text: "{result>technicianName}" }),
+      new sap.m.ObjectStatus({ text: { parts: ["result>status", "result>ref"], formatter: function (s, r) { return s === "SUCCESS" ? r : s; } }, state: { path: "result>status", formatter: function (s) { return s === "SUCCESS" ? "Success" : "Error"; } } })
+    ]})});
+    var resultPanel = new sap.m.Panel({ headerText: "Result", visible: false, content: [resultTable] }).addStyleClass("sapUiMediumMarginTop");
+
+    var page = new sap.m.Page({ title: "EvoSplit", content: [contextStrip, form, partsTable, btnSplit, resultPanel] }).addStyleClass("sapUiContentPadding");
+    var app = new sap.m.App({ pages: [page] });
+    app.setModel(oModel);
+    app.setModel(oResultModel, "result");
+    app.placeAt("content");
+
+    // ---------- config + shell connect --------------------------------
+    fetch("./config.json").then(function (r) { return r.ok ? r.json() : {}; }).then(function (c) { if (c) Object.assign(CFG, c); }).catch(function () {}).then(initShell);
+
+    function initShell() {
+      try {
+        if (!window.FSMShell || !FSMShell.ShellSdk || !FSMShell.ShellSdk.isInsideShell()) return;
+        var EV = FSMShell.SHELL_EVENTS;
+        var sdk = FSMShell.ShellSdk.init(parent, "*");
+        sdk.on(EV.Version1.REQUIRE_CONTEXT, function (ev) {
+          var c; try { c = typeof ev === "string" ? JSON.parse(ev) : ev; } catch (e) { return; }
+          inShell = true;
+          CTX = { cloudHost: c.cloudHost, account: c.account, company: c.company, token: c.auth && c.auth.access_token };
+          var sc = c.selectedServiceCall || (c.selectedActivities && c.selectedActivities.serviceCall) || "";
+          if (sc) oModel.setProperty("/serviceCall", sc);
+          var sa = (c.selectedActivities && (c.selectedActivities.id || c.selectedActivities.code)) || "";
+          if (sa) oModel.setProperty("/sourceActivity", sa);
+          contextStrip.setType("Success").setText("Connected to FSM (" + c.account + " / " + c.company + "). Pick an activity, assign technicians, then Split & assign.");
+          loadTechnicians();
+          loadActivities();
+        });
+        sdk.emit(EV.Version1.REQUIRE_CONTEXT, { clientIdentifier: CFG.clientId, auth: { response_type: "token" } });
+      } catch (e) { /* standalone */ }
+    }
+
+    // ---------- test seam (no effect in production) -------------------
+    if (typeof window !== "undefined" && window.__EVOSPLIT_TEST__) {
+      window.__evosplit = {
+        computeSplit: computeSplit, distributeByWeight: distributeByWeight, round: round,
+        onSplit: onSplit, applyActivitySelection: applyActivitySelection,
+        loadTechnicians: loadTechnicians, loadActivities: loadActivities,
+        oModel: oModel, oResultModel: oResultModel,
+        getCtx: function () { return CTX; }, isInShell: function () { return inShell; }
+      };
+    }
+  });
+  </script>
+</head>
+<body class="sapUiBody" style="margin:0;height:100%">
+  <div id="content" style="height:100%"></div>
+</body>
+</html>
