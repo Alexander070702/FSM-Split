@@ -1,4 +1,4 @@
 {
   "backendUrl": "",
-  "_comment": "LEAVE EMPTY for direct mode: the UI talks to FSM directly from the browser (reads work; create works only if your FSM user may create activities). If creating activities fails with 403/CORS, deploy the Cloudflare Worker (see README), then put its URL here, e.g. https://evosplit-proxy.NAME.workers.dev — then ALL calls go through the worker with a privileged service client."
+  "_comment": "EMPTY = direct mode (browser talks to FSM directly). This is what you want for now. Only set a REAL Cloudflare Worker URL here later if creating activities returns 403/CORS. The placeholder example is ignored automatically."
 }

@@ -184,7 +184,11 @@ function goLive(){
   if(S.selectedId) loadActivityById(S.selectedId,true);
 }
 function afterHandshake(){
-  if(usingProxy()){ goLive(); return; }
+  if(usingProxy()){
+    if(S.account&&S.company){ goLive(); }
+    else if(!handshakeDone){ setBadge("Warte auf Kontext…","warn"); }
+    return;
+  }
   if(S.token&&S.cloudHost&&S.account&&S.company){ goLive(); }
   else if(!handshakeDone){ setBadge("Warte auf Kontext/Token…","warn"); }
 }
@@ -433,7 +437,7 @@ $("btnCommit").addEventListener("click",commit);
 
 (function initDate(){ var d=new Date(); function p(n){return(n<10?"0":"")+n;} $("startDate").value=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate()); })();
 initDropzone(); debug("(noch kein Kontext)");
-fetch("./config.json").then(function(r){return r.ok?r.json():{};}).then(function(c){ if(c&&c.backendUrl!=null) BACKEND=c.backendUrl; }).catch(function(){}).then(connect);
+fetch("./config.json").then(function(r){return r.ok?r.json():{};}).then(function(c){ var u=(c&&c.backendUrl!=null)?String(c.backendUrl).trim():""; if(/your-subdomain|YOUR-SUBDOMAIN|NAME\.workers\.dev/i.test(u)) u=""; BACKEND=u; }).catch(function(){}).then(connect);
 })();
 </script>
 </body>
