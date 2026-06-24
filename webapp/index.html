@@ -71,7 +71,7 @@
 
     <section class="col" style="order:3">
       <h2>Aufteilen</h2>
-      <div id="dz" class="dz">Vorgang hierher ziehen<br><span style="font-size:11px;">oder in der Liste links anklicken</span></div>
+      <div id="dz" class="dz">Einen Vorgang links anklicken, um ihn hier zum Aufteilen zu übernehmen.</div>
       <div id="cfg" hidden>
         <div class="cfg">
           <label>Methode</label>
@@ -84,7 +84,7 @@
           <span class="hint">08–16 Uhr, Wochenende übersprungen</span>
         </div>
         <div class="cfg"><label>Status beim Anlegen</label>
-          <select id="commitStage"><option value="DISPATCHED">Geplant (DISPATCHED)</option><option value="EXECUTION">In Ausführung (EXECUTION)</option><option value="DISPATCHING">Dispatch-Pool (DISPATCHING)</option></select></div>
+          <select id="commitStage"><option value="">Wie Originalvorgang (empfohlen)</option><option value="DISPATCHING">Dispatch-Pool (DISPATCHING)</option></select></div>
         <button id="btnSplit" class="primary">Aufteilen, terminieren &amp; zuweisen</button>
         <div id="chunks" class="chunks"></div>
         <div id="sumline" class="sumline"></div>
@@ -247,12 +247,10 @@ function loadBoardData(){
    .then(function(fulls){
      var real=fulls.filter(function(a){ return a.object; });   // gehört zu einem Auftrag/Service Call
      S.operations=real.map(function(a){ return {id:a.id, subject:a.subject||a.id, hours:(a.durationInMinutes||0)/60, start:a.startDateTime, code:a.code, raw:a}; });
-     var techIds={}; real.forEach(function(a){ (a.responsibles||[]).forEach(function(id){ techIds[id]=true; }); });
-     var ids=Object.keys(techIds);
-     S.technicians = ids.length ? ids.map(function(id,i){ return {id:id, name:nameById[id]||id, color:TECH_COLORS[i%TECH_COLORS.length]}; })
-                                : Object.keys(nameById).slice(0,25).map(function(id,i){ return {id:id, name:nameById[id], color:TECH_COLORS[i%TECH_COLORS.length]}; });
+     var ids=Object.keys(nameById);
+     S.technicians = ids.map(function(id){ return {id:id, name:nameById[id]}; }).sort(function(a,b){ return a.name.localeCompare(b.name); }).map(function(t,i){ t.color=TECH_COLORS[i%TECH_COLORS.length]; return t; });
      renderTech(); renderOps();
-     log("Plantafel: "+S.operations.length+" Vorgänge zum Dispatchen · "+S.technicians.length+" Techniker"+(ids.length?"":" (Fallback: alle Personen)")+".","ok");
+     log("Plantafel: "+S.operations.length+" Vorgänge zum Dispatchen · "+S.technicians.length+" Personen/Techniker.","ok");
    })
    .catch(function(e){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); log("Plantafel-Daten nicht abrufbar ("+e.message+") – Beispieldaten.","err"); });
 }
@@ -307,7 +305,9 @@ function setCurrent(op){
   var dz=$("dz"); dz.classList.add("filled");
   var warn = op.raw ? (op.raw.object ? "" : " · (KEIN Auftragsbezug – Splits erscheinen NICHT auf der Tafel)") : " · (nur Eckdaten – per Anwahl/ID laden)";
   dz.innerHTML='<div class="opcard"><div class="t">'+esc(op.subject)+'</div><div class="m">'+fmtH(op.hours)+' h gesamt · '+esc(op.id)+warn+'</div></div>';
-  $("cfg").hidden=false; renderChunks(); $("btnCommit").disabled=true;
+  $("cfg").hidden=false;
+  if(op.raw) log("Quelle „"+(op.subject||op.id)+"“: stage="+(op.raw.executionStage||"—")+" · status="+(op.raw.status||"—")+" · type="+(op.raw.type||"—")+" · code="+(op.raw.code||"—")+" — diese Planungsstufe übernehmen die Teile.","info");
+  renderChunks(); $("btnCommit").disabled=true;
 }
 function initDropzone(){
   var dz=$("dz");
@@ -374,15 +374,22 @@ function buildBody(ch,i,n){
   var src=(S.current&&S.current.raw)||{}; var body={};
   CFG.copyFromSource.forEach(function(f){ if(src[f]!=null) body[f]=src[f]; });
   body.id=uuid();
-  body.type="ASSIGNMENT";
+  body.type=src.type||"ASSIGNMENT";
   var baseSubject=(S.current.subject||"Vorgang").split(" – Teil ")[0];
   body[CFG.fld.subject]=baseSubject+" – Teil "+(i+1)+"/"+n;
   var mins=Math.round(ch.hours*60);
   body[CFG.fld.duration]=mins; body.plannedDurationInMinutes=mins; body.plannedDurationType="MANUAL";
-  body[CFG.fld.responsibles]=ch.techId?[ch.techId]:[];
-  body[CFG.fld.status]=ch.techId?"OPEN":"DRAFT";   // OPEN => auf der Plantafel sichtbar (DRAFT bleibt verborgen)
-  var stgEl=document.getElementById("commitStage"); var stg=(stgEl&&stgEl.value)||CFG.assignedStage;
-  body[CFG.fld.stage]=ch.techId?stg:"DISPATCHING";
+  var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value)||"";
+  if(ch.techId){
+    body[CFG.fld.responsibles]=[ch.techId];
+    // Status + Planungsstufe vom Originalvorgang übernehmen – der ist nachweislich auf der Tafel sichtbar:
+    body[CFG.fld.status]=src[CFG.fld.status]||"OPEN";
+    body[CFG.fld.stage]=forced||src[CFG.fld.stage]||"DISPATCHING";
+  } else {
+    body[CFG.fld.responsibles]=[];
+    body[CFG.fld.status]=src[CFG.fld.status]||"OPEN";
+    body[CFG.fld.stage]="DISPATCHING";
+  }
   if(ch.start){ body[CFG.fld.start]=ch.start; body[CFG.fld.end]=ch.end; body[CFG.fld.startActual]=ch.start; body[CFG.fld.endActual]=ch.end; }
   return body;
 }
