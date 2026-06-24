@@ -75,8 +75,8 @@
       <div id="cfg" hidden>
         <div class="cfg">
           <label>Methode</label>
-          <select id="mode"><option value="perTech">Gleichmäßig auf Techniker</option><option value="block">Blöcke à</option><option value="perDay">Pro Arbeitstag (8 h)</option></select>
-          <input id="blockH" type="number" min="1" step="1" value="40" hidden/><span id="blockUnit" class="hint" hidden>Stunden</span>
+          <select id="mode"><option value="exact">Genau X Stunden (1 neue Aktivität)</option><option value="perTech">Gleichmäßig auf Techniker</option><option value="block">Blöcke à</option><option value="perDay">Pro Arbeitstag (8 h)</option></select>
+          <input id="blockH" type="number" min="0.5" step="0.5" value="8"/><span id="blockUnit" class="hint">Stunden</span>
         </div>
         <div class="cfg">
           <label><input type="checkbox" id="setTimes" checked/> Terminieren ab</label>
@@ -322,7 +322,8 @@ function initDropzone(){
 function splitHours(total,mode){
   var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];});
   var parts=[];
-  if(mode==="perTech"){ var n=Math.max(sel.length,1); var baseH=Math.floor((total/n)*2)/2; var acc=0; for(var i=0;i<n;i++){ var h=(i===n-1)?+(total-acc).toFixed(2):baseH; acc+=h; parts.push(h); } }
+  if(mode==="exact"){ var x=Math.max(parseFloat($("blockH").value)||0,0); if(x>total) x=total; if(x>0.0001) parts.push(+x.toFixed(2)); }
+  else if(mode==="perTech"){ var n=Math.max(sel.length,1); var baseH=Math.floor((total/n)*2)/2; var acc=0; for(var i=0;i<n;i++){ var h=(i===n-1)?+(total-acc).toFixed(2):baseH; acc+=h; parts.push(h); } }
   else { var size=mode==="perDay"?CFG.workdayHours:Math.max(parseFloat($("blockH").value)||1,1); var rem=total; while(rem>0.0001){ var hh=Math.min(size,+rem.toFixed(2)); parts.push(+hh.toFixed(2)); rem=+(rem-hh).toFixed(2); } }
   return parts;
 }
@@ -369,9 +370,15 @@ function renderChunks(){
   });
   var sum=S.chunks.reduce(function(a,ch){return a+ch.hours;},0); var sl=$("sumline");
   if(!S.chunks.length){ sl.textContent=""; $("btnCommit").disabled=true; return; }
-  var ok=Math.abs(sum-S.current.hours)<0.01; var all=S.chunks.every(function(ch){return ch.techId;});
-  sl.className="sumline "+(ok?"ok":"bad");
-  sl.textContent=(ok?"✓ ":"⚠ ")+"Summe "+fmtH(sum)+" h von "+fmtH(S.current.hours)+" h"+(all?" · alle zugewiesen":" · nicht alle zugewiesen");
+  var total=S.current.hours, over=sum>total+0.01, empty=sum<0.009;
+  var ok=!over&&!empty; var all=S.chunks.every(function(ch){return ch.techId;});
+  sl.className="sumline "+((ok&&all)?"ok":"bad");
+  var msg;
+  if(empty) msg="⚠ 0 h verplant";
+  else if(over) msg="⚠ "+fmtH(sum)+" h – mehr als die Aktivität hat ("+fmtH(total)+" h)";
+  else if(Math.abs(sum-total)<0.01) msg="✓ "+fmtH(sum)+" h – vollständig verplant";
+  else msg="✓ "+fmtH(sum)+" h von "+fmtH(total)+" h verplant · Rest "+fmtH(total-sum)+" h bleibt im Original";
+  sl.textContent=msg+(all?" · alle zugewiesen":" · nicht alle zugewiesen");
   $("btnCommit").disabled=!(ok&&all);
 }
 
@@ -390,10 +397,10 @@ function buildBody(ch,i,n){
   var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value||"").trim();
   if(ch.techId){
     body[CFG.fld.responsibles]=[ch.techId];
+    body[CFG.fld.status]="OPEN";   // OPEN = board-sichtbar (mit Service Call); nie DRAFT erben
     var s=forced||src[CFG.fld.stage]||"EXECUTION";
     if(!forced && /^DISPATCHING$/i.test(s)) s="EXECUTION";   // zugewiesene Teile gehören auf den Gantt, nicht in den Pool
     body[CFG.fld.stage]=s;
-    if(body[CFG.fld.status]==null) body[CFG.fld.status]="OPEN";
   } else {
     body[CFG.fld.responsibles]=[];
     body[CFG.fld.status]="OPEN";
@@ -447,7 +454,7 @@ $("btnLoadTech").addEventListener("click",loadBoardData);
 $("btnDemo").addEventListener("click",function(){ S.operations=demoOps(); renderOps(); if(!S.technicians.length){S.technicians=demoTech();renderTech();} });
 $("btnLoadId").addEventListener("click",function(){ var id=$("opId").value.trim(); if(id) loadActivityById(id,true); });
 $("btnAll").addEventListener("click",function(){ S.technicians.forEach(function(t){S.selectedTech[t.id]=true;}); renderTech(); });
-$("mode").addEventListener("change",function(){ var b=$("mode").value==="block"; $("blockH").hidden=!b; $("blockUnit").hidden=!b; });
+$("mode").addEventListener("change",function(){ var m=$("mode").value; var show=(m==="block"||m==="exact"); $("blockH").hidden=!show; $("blockUnit").hidden=!show; $("blockUnit").textContent=(m==="exact")?"Stunden (gesamt, 1 Aktivität)":"Stunden je Block"; });
 $("setTimes").addEventListener("change",renderChunks);
 $("startDate").addEventListener("change",renderChunks);
 $("btnSplit").addEventListener("click",doSplit);
