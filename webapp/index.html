@@ -66,7 +66,7 @@
       <div class="toolbar"><button id="btnLoadOps">Plantafel laden</button><button id="btnDemo" class="ghost">Beispieldaten</button></div>
       <div class="toolbar"><input id="opId" type="text" placeholder="Activity-ID …" style="flex:1;min-width:120px;"/><button id="btnLoadId">Laden</button></div>
       <div id="opList"></div>
-      <div class="hint">Liste = geplante Vorgänge von der Plantafel. „JSON ansehen" zeigt die Rohdaten eines Vorgangs (zum Abgleich).</div>
+      <div class="hint">Liste = Vorgänge zum Dispatchen (gehören zu einem Auftrag/Service Call). Klick übernimmt den Vorgang unten zum Aufteilen. „JSON" zeigt die Rohdaten.</div>
     </section>
 
     <section class="col" style="order:3">
@@ -101,7 +101,7 @@
       <h2>Techniker</h2>
       <div class="toolbar"><button id="btnLoadTech">Plantafel laden</button><button id="btnAll" class="ghost">Alle wählen</button></div>
       <div id="techList"></div>
-      <div class="hint">Klick = für Aufteilung auswählen. Chunk auf Techniker ziehen = manuell zuweisen.</div>
+      <div class="hint">Klick = Techniker für die automatische Aufteilung aus-/abwählen. Pro Teil lässt sich der Techniker unten per Dropdown ändern.</div>
     </section>
   </div>
 
@@ -209,12 +209,21 @@ function uuid(){return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g,functi
 function authedFetch(url,opts){ opts=opts||{}; opts.headers=hdr(); return fetch(url,opts).then(function(r){ if(r.status!==401) return r; return refreshToken().then(function(){ opts.headers=hdr(); return fetch(url,opts); }); }); }
 function runQuery(sql,dto){ return authedFetch(qbase()+qp(dto),{method:"POST",body:JSON.stringify({query:sql})}).then(check("Query")).then(function(r){return r.json();}); }
 function rows(res){ var d=res&&res.data?res.data:[]; return d.map(function(row){ if(row&&typeof row==="object"&&!Array.isArray(row)){ var k=Object.keys(row); if(k.length===1&&row[k[0]]&&typeof row[k[0]]==="object") return row[k[0]]; } return row; }); }
+function probeQuery(object,dto){
+  return fetch(qbase()+qp(dto),{method:"POST",headers:hdr(),body:JSON.stringify({query:"SELECT x.id FROM "+object+" x"})})
+    .then(function(r){ return r.text().then(function(b){ return {ok:r.ok,status:r.status,body:b}; }); })
+    .catch(function(e){ return {ok:false,status:0,body:String((e&&e.message)||e)}; });
+}
 function resolveVersion(object){
-  if(S.ver[object]) return Promise.resolve(S.ver[object]);
-  var versions=[50,48,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,28,26,24,22,21,20,18,16,14,12,10];
-  var q=JSON.stringify({query:"SELECT x.id FROM "+object+" x"});
-  return Promise.all(versions.map(function(v){ return fetch(qbase()+qp(object+"."+v),{method:"POST",headers:hdr(),body:q}).then(function(r){return {v:v,ok:r.ok};}).catch(function(){return {v:v,ok:false};}); }))
-    .then(function(res){ var ok=res.filter(function(x){return x.ok;}).map(function(x){return x.v;}); if(!ok.length) throw new Error("Keine gültige DTO-Version für "+object+" (Auth/CORS/Endpoint prüfen)."); S.ver[object]=Math.max.apply(null,ok); log("DTO-Version "+object+"."+S.ver[object]+" erkannt.","info"); return S.ver[object]; });
+  if(S.ver[object]!=null) return Promise.resolve(S.ver[object]);
+  return probeQuery(object,"").then(function(r){
+    if(r.ok){ S.ver[object]=""; log("Query OK ohne DTO-Version ("+object+").","info"); return ""; }
+    var versions=[44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20];
+    return Promise.all(versions.map(function(v){ return probeQuery(object,object+"."+v).then(function(rr){ return {v:v,ok:rr.ok}; }); }))
+      .then(function(res){ var ok=res.filter(function(x){return x.ok;}).map(function(x){return x.v;});
+        if(ok.length){ var best=Math.max.apply(null,ok); S.ver[object]=object+"."+best; log("DTO-Version "+S.ver[object]+" erkannt.","info"); return S.ver[object]; }
+        throw new Error(object+"-Query "+r.status+(r.body?(": "+r.body.replace(/\s+/g," ").slice(0,300)):" (kein Body)")); });
+  });
 }
 
 function loadBoardData(){
@@ -222,35 +231,34 @@ function loadBoardData(){
   log("Lade Plantafel-Daten…","info");
   var AV, PV, nameById={};
   Promise.all([resolveVersion("Activity"), resolveVersion("Person")])
-   .then(function(vv){ AV="Activity."+vv[0]; PV="Person."+vv[1];
+   .then(function(vv){ AV=vv[0]; PV=vv[1];
      return runQuery("SELECT p.id, p.firstName, p.lastName FROM Person p", PV); })
    .then(function(res){ rows(res).forEach(function(p){ nameById[p.id]=((p.firstName||"")+" "+(p.lastName||"")).trim()||p.id; });
-     return runQuery("SELECT a.id, a.subject, a.durationInMinutes, a.startDateTime FROM Activity a", AV); })
+     return runQuery("SELECT a.id, a.subject, a.durationInMinutes, a.code, a.startDateTime FROM Activity a", AV); })
    .then(function(res){
-     var planned=rows(res).filter(function(a){ return a.startDateTime; });
-     planned.sort(function(x,y){ return (y.startDateTime||"").localeCompare(x.startDateTime||""); });
-     planned=planned.slice(0,40);
-     // Vollobjekte laden (für Verantwortliche + Verknüpfungen + Rohdaten)
-     return Promise.all(planned.map(function(a){
+     var list=rows(res).filter(function(a){ return a.code; });   // hat Vorgangsnummer
+     list.sort(function(x,y){ return (y.startDateTime||"").localeCompare(x.startDateTime||""); });
+     list=list.slice(0,25);
+     return Promise.all(list.map(function(a){
        return authedFetch(base()+"/Activity/"+a.id+qp(AV)).then(function(r){ return r.ok?r.json():null; })
          .then(function(d){ return d?((d.data&&d.data[0]&&d.data[0].activity)||d.activity||d):a; }).catch(function(){ return a; });
      }));
    })
    .then(function(fulls){
-     var real=fulls.filter(function(a){ return a.object && a.code; });   // echte Vorgänge: Auftragsbezug + Nummer (Geister-Inserts ausblenden)
-     S.operations=real.map(function(a){ return {id:a.id, subject:a.subject||a.id, hours:(a.durationInMinutes||0)/60, start:a.startDateTime, raw:a}; });
+     var real=fulls.filter(function(a){ return a.object; });   // gehört zu einem Auftrag/Service Call
+     S.operations=real.map(function(a){ return {id:a.id, subject:a.subject||a.id, hours:(a.durationInMinutes||0)/60, start:a.startDateTime, code:a.code, raw:a}; });
      var techIds={}; real.forEach(function(a){ (a.responsibles||[]).forEach(function(id){ techIds[id]=true; }); });
      var ids=Object.keys(techIds);
      S.technicians = ids.length ? ids.map(function(id,i){ return {id:id, name:nameById[id]||id, color:TECH_COLORS[i%TECH_COLORS.length]}; })
                                 : Object.keys(nameById).slice(0,25).map(function(id,i){ return {id:id, name:nameById[id], color:TECH_COLORS[i%TECH_COLORS.length]}; });
      renderTech(); renderOps();
-     log("Plantafel: "+S.operations.length+" echte Vorgänge (mit Auftrag), "+S.technicians.length+" Techniker.","ok");
+     log("Plantafel: "+S.operations.length+" Vorgänge zum Dispatchen · "+S.technicians.length+" Techniker"+(ids.length?"":" (Fallback: alle Personen)")+".","ok");
    })
    .catch(function(e){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); log("Plantafel-Daten nicht abrufbar ("+e.message+") – Beispieldaten.","err"); });
 }
 function loadActivityById(id,asSelected){
   if(!S.live){ var d=demoOps().find(function(o){return o.id===id;})||{id:id,subject:"Demo "+id,hours:100}; addOp(d); if(asSelected) setCurrent(d); return; }
-  resolveVersion("Activity").then(function(v){ return authedFetch(base()+"/Activity/"+id+qp("Activity."+v)); }).then(check("GET Activity")).then(function(r){return r.json();})
+  resolveVersion("Activity").then(function(v){ return authedFetch(base()+"/Activity/"+id+qp(v)); }).then(check("GET Activity")).then(function(r){return r.json();})
     .then(function(res){ var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
       var op={id:a.id,subject:a[CFG.fld.subject]||a.id,hours:(a[CFG.fld.duration]||0)/60,raw:a};
       addOp(op); if(asSelected) setCurrent(op); })
@@ -270,14 +278,12 @@ function renderSelected(){
 }
 function renderOps(){
   var c=$("opList"); c.innerHTML="";
-  if(!S.operations.length){ c.appendChild(el("div","empty","Noch keine Vorgänge. „Plantafel laden“, per ID laden oder Beispieldaten.")); return; }
+  if(!S.operations.length){ c.appendChild(el("div","empty","Keine Vorgänge zum Dispatchen. „Plantafel laden“ oder per ID laden.")); return; }
   S.operations.forEach(function(op){
-    var d=el("div","op"); d.draggable=true; d.title="Ziehen oder klicken zum Aufteilen";
-    var meta=fmtH(op.hours)+' h'+(op.start?(' · '+fmtDate(op.start)):'');
+    var d=el("div","op"); d.title="Klicken, um diesen Vorgang unten zum Aufteilen zu übernehmen";
+    var meta=fmtH(op.hours)+' h'+(op.code?(' · '+esc(op.code)):'')+(op.start?(' · '+fmtDate(op.start)):'');
     d.innerHTML='<div class="t">'+esc(op.subject)+'</div><div class="m">'+meta+'</div>';
-    if(op.raw){ var ins=el("button","ghost","JSON ansehen"); ins.style.cssText="margin-top:6px;padding:3px 8px;font-size:11px;"; ins.addEventListener("click",function(ev){ ev.stopPropagation(); inspectActivity(op); }); d.appendChild(ins); }
-    d.addEventListener("dragstart",function(e){ S.drag={kind:"op",id:op.id}; try{e.dataTransfer.setData("text/plain",op.id);}catch(_){} e.dataTransfer.effectAllowed="copyMove"; });
-    d.addEventListener("dragend",function(){ S.drag=null; });
+    if(op.raw){ var ins=el("button","ghost","JSON"); ins.style.cssText="margin-top:6px;padding:3px 8px;font-size:11px;"; ins.addEventListener("click",function(ev){ ev.stopPropagation(); inspectActivity(op); }); d.appendChild(ins); }
     d.addEventListener("click",function(){ setCurrent(op); });
     c.appendChild(d);
   });
@@ -288,12 +294,9 @@ function renderTech(){
   if(!S.technicians.length){ c.appendChild(el("div","empty","Keine Techniker geladen.")); return; }
   S.technicians.forEach(function(t){
     var sd=!!S.selectedTech[t.id]; var cnt=S.chunks.filter(function(ch){return ch.techId===t.id;}).length;
-    var d=el("div","tech"+(sd?" seld":"")); d.dataset.tech=t.id;
+    var d=el("div","tech"+(sd?" seld":"")); d.dataset.tech=t.id; d.title="Klicken zum Aus-/Abwählen";
     d.innerHTML='<span class="dot" style="background:'+t.color+'"></span><span class="name">'+esc(t.name)+'</span><span class="cnt">'+(cnt?cnt+" Chunk(s)":"")+'</span>';
     d.addEventListener("click",function(){ S.selectedTech[t.id]=!S.selectedTech[t.id]; renderTech(); });
-    d.addEventListener("dragover",function(e){ e.preventDefault(); if(S.drag&&S.drag.kind==="chunk") d.classList.add("hot"); });
-    d.addEventListener("dragleave",function(){ d.classList.remove("hot"); });
-    d.addEventListener("drop",function(e){ e.preventDefault(); d.classList.remove("hot"); if(S.drag&&S.drag.kind==="chunk"){ S.chunks[S.drag.idx].techId=t.id; S.drag=null; renderChunks(); renderTech(); } });
     c.appendChild(d);
   });
 }
@@ -308,9 +311,7 @@ function setCurrent(op){
 }
 function initDropzone(){
   var dz=$("dz");
-  dz.addEventListener("dragover",function(e){ e.preventDefault(); if(S.drag&&S.drag.kind==="op") dz.classList.add("hot"); });
-  dz.addEventListener("dragleave",function(){ dz.classList.remove("hot"); });
-  dz.addEventListener("drop",function(e){ e.preventDefault(); dz.classList.remove("hot"); var id=(S.drag&&S.drag.kind==="op")?S.drag.id:e.dataTransfer.getData("text/plain"); var op=S.operations.find(function(o){return o.id===id;}); if(op) setCurrent(op); S.drag=null; });
+  if(dz && !dz.classList.contains("filled")) dz.innerHTML='<div class="hint" style="color:#7a828f;font-size:13px;">Einen Vorgang oben anklicken, um ihn hier zum Aufteilen zu übernehmen.</div>';
 }
 function splitHours(total,mode){
   var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];});
@@ -350,13 +351,13 @@ function renderChunks(){
   var c=$("chunks"); c.innerHTML="";
   S.chunks.forEach(function(ch,i){
     var t=S.technicians.find(function(x){return x.id===ch.techId;}); var color=t?t.color:"#ccc";
-    var d=el("div","chunk"); d.draggable=true; d.style.borderLeftColor=color;
+    var d=el("div","chunk"); d.style.borderLeftColor=color;
+    var opts='<option value="">– nicht zugewiesen –</option>'+S.technicians.map(function(x){ return '<option value="'+esc(x.id)+'"'+(x.id===ch.techId?" selected":"")+'>'+esc(x.name)+'</option>'; }).join("");
     d.innerHTML='<span class="h">'+fmtH(ch.hours)+' h</span>'+
-      '<span class="who '+(t?"assigned":"")+'">'+(t?('<span class="dot" style="display:inline-block;background:'+color+';margin-right:6px;"></span>'+esc(t.name)):"– nicht zugewiesen –")+'</span>'+
+      '<select class="assign" style="flex:1;min-width:120px;padding:4px 6px;border:1px solid #cdd3dd;border-radius:6px;font-size:12px;">'+opts+'</select>'+
       (ch.start?('<span class="when">'+fmtDate(ch.start)+'</span>'):'')+
       '<span class="x" title="Entfernen">×</span>';
-    d.addEventListener("dragstart",function(e){ S.drag={kind:"chunk",idx:i}; try{e.dataTransfer.setData("text/plain","chunk");}catch(_){} });
-    d.addEventListener("dragend",function(){ S.drag=null; });
+    d.querySelector(".assign").addEventListener("change",function(e){ S.chunks[i].techId=e.target.value||null; renderChunks(); renderTech(); });
     d.querySelector(".x").addEventListener("click",function(){ S.chunks.splice(i,1); renderChunks(); renderTech(); });
     c.appendChild(d);
   });
@@ -396,7 +397,7 @@ function commit(){
     return;
   }
   resolveVersion("Activity").then(function(v){
-    var dto="Activity."+v;
+    var dto=v;
     S.chunks.forEach(function(ch,i){
       var who=(S.technicians.find(function(t){return t.id===ch.techId;})||{}).name||"?";
       var body=buildBody(ch,i,n);
