@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>EVOSPLIT – Vorgänge aufteilen &amp; zuweisen</title>
+<style>
+  :root{--bg:#fff;--panel:#f7f8fa;--line:#e3e6ea;--fg:#1d2d3e;--muted:#67717c;
+    --blue:#0a6ed1;--blue-d:#0856a8;--amber:#f6a800;--ok:#107e3e;--err:#bb0000;--radius:10px;--shadow:0 1px 3px rgba(0,0,0,.08);}
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:"72","Segoe UI",Roboto,Arial,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:1.45;}
+  .app{padding:14px;}
+  header.top{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+  header.top h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.2px;}
+  .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;}
+  .badge.ok{background:#ebf5ec;color:var(--ok);} .badge.warn{background:#fef3da;color:#8a5d00;} .badge.err{background:#ffebeb;color:var(--err);}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 12px;}
+  .grid{display:flex;flex-direction:column;gap:12px;}
+  @media(max-width:920px){.grid{grid-template-columns:1fr;}}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px;min-height:120px;}
+  .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0 0 10px;font-weight:700;}
+  .toolbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+  button{font-family:inherit;font-size:12px;font-weight:600;border:1px solid var(--line);background:#fff;color:var(--fg);padding:7px 11px;border-radius:7px;cursor:pointer;transition:.12s;}
+  button:hover{border-color:#c3c9d0;} button.primary{background:var(--blue);border-color:var(--blue);color:#fff;} button.primary:hover{background:var(--blue-d);}
+  button.primary:disabled{background:#aab4bf;border-color:#aab4bf;cursor:default;} button.ghost{background:transparent;}
+  .sel{background:#eaf3fc;border:1px solid #b8d8f5;border-radius:8px;padding:9px 10px;margin-bottom:10px;}
+  .sel .lbl{font-size:11px;font-weight:700;color:var(--blue-d);text-transform:uppercase;letter-spacing:.5px;}
+  .sel .t{font-weight:700;margin:2px 0;}
+  .op{background:#fff;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;padding:9px 10px;margin-bottom:8px;cursor:grab;box-shadow:var(--shadow);}
+  .op:active{cursor:grabbing;} .op .t{font-weight:700;} .op .m{color:var(--muted);font-size:12px;}
+  .empty{color:var(--muted);font-size:12px;border:1px dashed var(--line);border-radius:8px;padding:14px;text-align:center;}
+  .dz{border:2px dashed #c3c9d0;border-radius:10px;padding:26px 14px;min-height:88px;text-align:center;color:var(--muted);transition:.12s;background:#fff;}
+  .dz.hot{border-color:var(--blue);background:#eaf3fc;color:var(--blue-d);} .dz.filled{border-style:solid;border-color:var(--line);text-align:left;color:var(--fg);padding:14px;}
+  .opcard .t{font-weight:700;font-size:14px;} .opcard .m{color:var(--muted);}
+  .cfg{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;}
+  .cfg label{color:var(--muted);font-size:12px;}
+  select,input[type=number],input[type=text],input[type=date]{font-family:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--fg);}
+  input[type=number]{width:84px;}
+  .chunks{margin-top:10px;display:flex;flex-direction:column;gap:7px;}
+  .chunk{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-left:5px solid #ccc;border-radius:8px;padding:7px 9px;cursor:grab;}
+  .chunk .h{font-weight:700;min-width:52px;} .chunk .who{flex:1;color:var(--muted);} .chunk .who.assigned{color:var(--fg);font-weight:600;}
+  .chunk .when{color:var(--muted);font-size:11px;white-space:nowrap;} .chunk .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px;}
+  .sumline{font-size:12px;margin-top:8px;} .sumline.ok{color:var(--ok);} .sumline.bad{color:var(--err);}
+  .tech{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:7px;cursor:pointer;}
+  .tech.seld{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue) inset;} .tech.hot{background:#eaf3fc;border-color:var(--blue);}
+  .dot{width:12px;height:12px;border-radius:50%;flex:0 0 auto;} .tech .name{flex:1;font-weight:600;} .tech .cnt{color:var(--muted);font-size:12px;}
+  .actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;}
+  .log{margin-top:12px;font-size:12px;max-height:240px;overflow:auto;}
+  .log .row{padding:5px 8px;border-radius:6px;margin-bottom:5px;}
+  .log .row.ok{background:#ebf5ec;color:#0c5c2e;} .log .row.err{background:#ffebeb;color:var(--err);} .log .row.info{background:#eef1f4;color:var(--muted);}
+  details{margin-top:14px;font-size:12px;color:var(--muted);} pre{background:#f1f3f5;padding:10px;border-radius:8px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all;}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top"><h1>EVOSPLIT</h1><span id="conn" class="badge warn">verbinde…</span>
+    <button id="btnRefresh" class="ghost" style="margin-left:auto;">Auswahl &amp; Token aktualisieren</button>
+  </header>
+  <div class="sub">Vorgang aus FSM wählen oder laden, Stunden automatisch aufteilen, terminieren und Technikern zuweisen.</div>
+
+  <div class="grid">
+    <section class="col" style="order:1">
+      <h2>Vorgänge</h2>
+      <div id="selBox"></div>
+      <div class="toolbar"><button id="btnLoadOps">Plantafel laden</button><button id="btnDemo" class="ghost">Beispieldaten</button></div>
+      <div class="toolbar"><input id="opId" type="text" placeholder="Activity-ID …" style="flex:1;min-width:120px;"/><button id="btnLoadId">Laden</button></div>
+      <div id="opList"></div>
+      <div class="hint">Liste = Vorgänge zum Dispatchen (gehören zu einem Auftrag/Service Call). Klick übernimmt den Vorgang unten zum Aufteilen. „JSON" zeigt die Rohdaten.</div>
+    </section>
+
+    <section class="col" style="order:3">
+      <h2>Aufteilen</h2>
+      <div id="dz" class="dz">Einen Vorgang links anklicken, um ihn hier zum Aufteilen zu übernehmen.</div>
+      <div id="cfg" hidden>
+        <div class="cfg">
+          <label>Methode</label>
+          <select id="mode"><option value="perTech">Gleichmäßig auf Techniker</option><option value="block">Blöcke à</option><option value="perDay">Pro Arbeitstag (8 h)</option></select>
+          <input id="blockH" type="number" min="1" step="1" value="40" hidden/><span id="blockUnit" class="hint" hidden>Stunden</span>
+        </div>
+        <div class="cfg">
+          <label><input type="checkbox" id="setTimes" checked/> Terminieren ab</label>
+          <input id="startDate" type="date"/>
+          <span class="hint">08–16 Uhr, Wochenende übersprungen</span>
+        </div>
+        <div class="cfg"><label>executionStage beim Anlegen</label>
+          <input id="commitStage" type="text" placeholder="leer = wie Quelle"/></div>
+        <button id="btnSplit" class="primary">Aufteilen, terminieren &amp; zuweisen</button>
+        <div id="chunks" class="chunks"></div>
+        <div id="sumline" class="sumline"></div>
+        <div class="actions">
+          <button id="btnAuto">Automatisch zuweisen</button>
+          <button id="btnCommit" class="primary" disabled>Auf Plantafel anlegen</button>
+          <button id="btnReset" class="ghost">Zurücksetzen</button>
+        </div>
+        <div id="log" class="log"></div>
+      </div>
+    </section>
+
+    <section class="col" style="order:2">
+      <h2>Techniker</h2>
+      <div class="toolbar"><button id="btnLoadTech">Plantafel laden</button><button id="btnAll" class="ghost">Alle wählen</button></div>
+      <div id="techList"></div>
+      <div class="hint">Klick = Techniker für die automatische Aufteilung aus-/abwählen. Pro Teil lässt sich der Techniker unten per Dropdown ändern.</div>
+    </section>
+  </div>
+
+  <details id="dbg"><summary>Konfiguration &amp; Debug</summary><pre id="dbgPre">–</pre></details>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fsm-shell@1.27.1/release/fsm-shell-client.js" onerror="window.__sdkFailed=true"></script>
+<script>
+(function(){
+"use strict";
+
+// Base URL of the CAP backend (FSM proxy). "" = same origin (the CAP app serves
+// this page). Overridable via config.json -> backendUrl.
+var BACKEND = "";
+
+var CFG = {
+  clientIdentifier:"split-extension", clientVersion:"1.0.0",
+  fld:{ duration:"durationInMinutes", subject:"subject", responsibles:"responsibles",
+        object:"object", businessPartner:"businessPartner", location:"location",
+        start:"earliestStartDateTime", end:"dueDateTime", startActual:"startDateTime", endActual:"endDateTime", stage:"executionStage", status:"status" },
+  // Vom Originalvorgang zu übernehmende Verknüpfungsfelder (für Plantafel-Sichtbarkeit/Auftrag):
+  copyFromSource:["serviceCall","object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope","status","executionStage"],
+  assignedStage:"DISPATCHED", workdayStart:8, workdayHours:8,
+  qTechnicians:"SELECT p.id, p.firstName, p.lastName FROM Person p",
+  qOpenOps:"SELECT a.id, a.subject, a.durationInMinutes FROM Activity a"
+};
+var TECH_COLORS=["#0a6ed1","#107e3e","#e9730c","#7858a8","#188918","#c0399f","#0f828f","#d04343"];
+
+var S={ live:false, token:null, cloudHost:null, account:null, company:null,
+        operations:[], technicians:[], selectedTech:{}, current:null, chunks:[],
+        ver:{}, drag:null, selectedId:null, authWaiters:[] };
+
+var $=function(id){return document.getElementById(id);};
+function el(tag,cls,html){var e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;}
+function fmtH(h){return Math.round(h*100)/100;}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function setBadge(t,c){var b=$("conn");b.textContent=t;b.className="badge "+c;}
+function debug(o){ $("dbgPre").textContent="Kontext / Zustand:\n"+(typeof o==="string"?o:JSON.stringify(o,null,2)); }
+function parseMaybe(p){try{return typeof p==="string"?JSON.parse(p):p;}catch(e){return p||{};}}
+var WD=["So","Mo","Di","Mi","Do","Fr","Sa"];
+function fmtDate(iso){ if(!iso)return""; var d=new Date(iso); function p(n){return(n<10?"0":"")+n;} return WD[d.getDay()]+" "+p(d.getDate())+"."+p(d.getMonth()+1)+". "+p(d.getHours())+":"+p(d.getMinutes()); }
+
+/* ---------- Shell Handshake ---------- */
+function connect(){
+  if(window.__sdkFailed||typeof FSMShell==="undefined"){ if(usingProxy()) goLive(); else enterDemo("SDK nicht geladen"); return; }
+  var ShellSdk=FSMShell.ShellSdk, EV=FSMShell.SHELL_EVENTS;
+  if(!ShellSdk.isInsideShell()){ if(usingProxy()) goLive(); else enterDemo("nicht in FSM eingebettet"); return; }
+  var sdk; try{ sdk=ShellSdk.init(parent,"*"); }catch(e){ try{ sdk=ShellSdk.init(parent); }catch(e2){ if(usingProxy()) goLive(); else enterDemo("Shell-Init fehlgeschlagen"); return; } }
+  S.sdk=sdk; S.EV=EV;
+  sdk.on(EV.Version1.REQUIRE_CONTEXT,function(ev){
+    var c=parseMaybe(ev); debug(c);
+    S.cloudHost=c.cloudHost||S.cloudHost; S.account=c.account||S.account; S.company=c.company||S.company;
+    if(c.auth&&c.auth.access_token) S.token=c.auth.access_token;
+    var vs=parseMaybe(c.viewState||{});
+    var sel=(c.selectedActivities&&c.selectedActivities[0])||c.selectedActivityId||c.activityId||(vs&&(vs.activityId||vs.selectedActivityId||(vs.selectedSidebar&&vs.selectedSidebar.id)||vs.id))||null;
+    if(!sel){ var mm=(location.search+location.hash).match(/(?:activityId|activity|id)=([0-9a-fA-F-]{8,})/); if(mm) sel=mm[1]; }
+    if(sel && sel!==S.selectedId){ S.selectedId=sel; renderSelected(); if(S.live) loadActivityById(sel,true); }
+    afterHandshake();
+  });
+  sdk.on(EV.Version1.REQUIRE_AUTHENTICATION,function(ev){
+    var a=parseMaybe(ev); var tok=a.access_token||a.token||(a.auth&&a.auth.access_token);
+    if(tok) S.token=tok;
+    var w=S.authWaiters; S.authWaiters=[]; w.forEach(function(fn){fn(S.token);});
+    afterHandshake();
+  });
+  requestContext();
+  setBadge("Handshake…","warn");
+}
+function requestContext(){
+  try{
+    S.sdk.emit(S.EV.Version1.REQUIRE_CONTEXT,{clientIdentifier:CFG.clientIdentifier,auth:{response_type:"token"}});
+    S.sdk.emit(S.EV.Version1.REQUIRE_AUTHENTICATION,{response_type:"token"});
+  }catch(e){}
+}
+var handshakeDone=false;
+function goLive(){
+  if(handshakeDone) return; handshakeDone=true; S.live=true;
+  setBadge((usingProxy()?"Verbunden über Proxy":"Verbunden (direkt)")+(S.account?(" · "+S.account+" / "+S.company):""),"ok");
+  loadBoardData();
+  if(S.selectedId) loadActivityById(S.selectedId,true);
+}
+function afterHandshake(){
+  if(usingProxy()){
+    if(S.account&&S.company){ goLive(); }
+    else if(!handshakeDone){ setBadge("Warte auf Kontext…","warn"); }
+    return;
+  }
+  if(S.token&&S.cloudHost&&S.account&&S.company){ goLive(); }
+  else if(!handshakeDone){ setBadge("Warte auf Kontext/Token…","warn"); }
+}
+function enterDemo(reason){
+  S.live=false; handshakeDone=true; setBadge("Demo-Modus ("+reason+")","warn"); debug("Demo-Modus: "+reason);
+  S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps();
+}
+function refreshToken(){ return new Promise(function(res){ S.authWaiters.push(res); try{ S.sdk.emit(S.EV.Version1.REQUIRE_AUTHENTICATION,{response_type:"token"}); }catch(e){ res(S.token); } setTimeout(function(){ res(S.token); },4000); }); }
+
+/* ---------- API ---------- */
+function usingProxy(){ return !!(BACKEND && BACKEND.length); }
+function base(){ return usingProxy() ? (BACKEND+"/fsm/data/v4") : ("https://"+S.cloudHost+"/api/data/v4"); }
+function qbase(){ return usingProxy() ? (BACKEND+"/fsm/query/v1") : ("https://"+S.cloudHost+"/api/query/v1"); }
+function qp(dto){return "?account="+encodeURIComponent(S.account)+"&company="+encodeURIComponent(S.company)+(dto?("&dtos="+encodeURIComponent(dto)):"");}
+function hdr(){var h={"Content-Type":"application/json","Accept":"application/json","X-Client-Id":CFG.clientIdentifier,"X-Client-Version":CFG.clientVersion}; if(!usingProxy()&&S.token) h["Authorization"]="Bearer "+S.token; return h;}
+function check(label){return function(r){ if(r.ok) return r; return r.text().then(function(b){ throw new Error(label+" "+r.status+(b?(": "+b.replace(/\s+/g," ").slice(0,500)):"")); }); };}
+function uuid(){return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==="x"?r:(r&0x3|0x8);return v.toString(16);});}
+function authedFetch(url,opts){ opts=opts||{}; opts.headers=hdr(); return fetch(url,opts).then(function(r){ if(r.status!==401) return r; return refreshToken().then(function(){ opts.headers=hdr(); return fetch(url,opts); }); }); }
+function runQuery(sql,dto){ return authedFetch(qbase()+qp(dto),{method:"POST",body:JSON.stringify({query:sql})}).then(check("Query")).then(function(r){return r.json();}); }
+function rows(res){ var d=res&&res.data?res.data:[]; return d.map(function(row){ if(row&&typeof row==="object"&&!Array.isArray(row)){ var k=Object.keys(row); if(k.length===1&&row[k[0]]&&typeof row[k[0]]==="object") return row[k[0]]; } return row; }); }
+function probeQuery(object,dto){
+  return fetch(qbase()+qp(dto),{method:"POST",headers:hdr(),body:JSON.stringify({query:"SELECT x.id FROM "+object+" x"})})
+    .then(function(r){ return r.text().then(function(b){ return {ok:r.ok,status:r.status,body:b}; }); })
+    .catch(function(e){ return {ok:false,status:0,body:String((e&&e.message)||e)}; });
+}
+function resolveVersion(object){
+  if(S.ver[object]!=null) return Promise.resolve(S.ver[object]);
+  return probeQuery(object,"").then(function(r){
+    if(r.ok){ S.ver[object]=""; log("Query OK ohne DTO-Version ("+object+").","info"); return ""; }
+    var versions=[44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,29,28,27,26,25,24,23,22,21,20];
+    return Promise.all(versions.map(function(v){ return probeQuery(object,object+"."+v).then(function(rr){ return {v:v,ok:rr.ok}; }); }))
+      .then(function(res){ var ok=res.filter(function(x){return x.ok;}).map(function(x){return x.v;});
+        if(ok.length){ var best=Math.max.apply(null,ok); S.ver[object]=object+"."+best; log("DTO-Version "+S.ver[object]+" erkannt.","info"); return S.ver[object]; }
+        throw new Error(object+"-Query "+r.status+(r.body?(": "+r.body.replace(/\s+/g," ").slice(0,300)):" (kein Body)")); });
+  });
+}
+
+function loadBoardData(){
+  if(!S.live){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); return; }
+  log("Lade Plantafel-Daten…","info");
+  var AV, PV, nameById={};
+  Promise.all([resolveVersion("Activity"), resolveVersion("Person")])
+   .then(function(vv){ AV=vv[0]; PV=vv[1];
+     return runQuery("SELECT p.id, p.firstName, p.lastName FROM Person p", PV); })
+   .then(function(res){ rows(res).forEach(function(p){ nameById[p.id]=((p.firstName||"")+" "+(p.lastName||"")).trim()||p.id; });
+     return runQuery("SELECT a.id, a.subject, a.durationInMinutes, a.code, a.startDateTime FROM Activity a", AV); })
+   .then(function(res){
+     var list=rows(res).filter(function(a){ return a.code; });   // hat Vorgangsnummer
+     list.sort(function(x,y){ return (y.startDateTime||"").localeCompare(x.startDateTime||""); });
+     list=list.slice(0,25);
+     return Promise.all(list.map(function(a){
+       return authedFetch(base()+"/Activity/"+a.id+qp(AV)).then(function(r){ return r.ok?r.json():null; })
+         .then(function(d){ return d?((d.data&&d.data[0]&&d.data[0].activity)||d.activity||d):a; }).catch(function(){ return a; });
+     }));
+   })
+   .then(function(fulls){
+     var real=fulls.filter(function(a){ return a.object; });   // gehört zu einem Auftrag/Service Call
+     S.operations=real.map(function(a){ return {id:a.id, subject:a.subject||a.id, hours:(a.durationInMinutes||0)/60, start:a.startDateTime, code:a.code, raw:a}; });
+     var ids=Object.keys(nameById);
+     S.technicians = ids.map(function(id){ return {id:id, name:nameById[id]}; }).sort(function(a,b){ return a.name.localeCompare(b.name); }).map(function(t,i){ t.color=TECH_COLORS[i%TECH_COLORS.length]; return t; });
+     renderTech(); renderOps();
+     log("Plantafel: "+S.operations.length+" Vorgänge zum Dispatchen · "+S.technicians.length+" Personen/Techniker.","ok");
+   })
+   .catch(function(e){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); log("Plantafel-Daten nicht abrufbar ("+e.message+") – Beispieldaten.","err"); });
+}
+function loadActivityById(id,asSelected){
+  if(!S.live){ var d=demoOps().find(function(o){return o.id===id;})||{id:id,subject:"Demo "+id,hours:100}; addOp(d); if(asSelected) setCurrent(d); return; }
+  resolveVersion("Activity").then(function(v){ return authedFetch(base()+"/Activity/"+id+qp(v)); }).then(check("GET Activity")).then(function(r){return r.json();})
+    .then(function(res){ var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
+      var op={id:a.id,subject:a[CFG.fld.subject]||a.id,hours:(a[CFG.fld.duration]||0)/60,raw:a};
+      addOp(op); if(asSelected) setCurrent(op); })
+    .catch(function(e){ log("Vorgang "+id+" nicht ladbar: "+e.message,"err"); });
+}
+function addOp(op){ var i=S.operations.findIndex(function(o){return o.id===op.id;}); if(i>=0) S.operations[i]=op; else S.operations.unshift(op); renderOps(); }
+
+/* ---------- Render ---------- */
+function renderSelected(){
+  var c=$("selBox"); c.innerHTML="";
+  if(!S.selectedId) return;
+  var d=el("div","sel");
+  d.innerHTML='<div class="lbl">Aktuell in FSM gewählt</div><div class="t">'+esc(S.selectedId)+'</div>';
+  var b=el("button","primary","Laden &amp; übernehmen"); b.style.marginTop="4px";
+  b.addEventListener("click",function(){ loadActivityById(S.selectedId,true); });
+  d.appendChild(b); c.appendChild(d);
+}
+function renderOps(){
+  var c=$("opList"); c.innerHTML="";
+  if(!S.operations.length){ c.appendChild(el("div","empty","Keine Vorgänge zum Dispatchen. „Plantafel laden“ oder per ID laden.")); return; }
+  S.operations.forEach(function(op){
+    var d=el("div","op"); d.title="Klicken, um diesen Vorgang unten zum Aufteilen zu übernehmen";
+    var meta=fmtH(op.hours)+' h'+(op.code?(' · '+esc(op.code)):'')+(op.start?(' · '+fmtDate(op.start)):'');
+    d.innerHTML='<div class="t">'+esc(op.subject)+'</div><div class="m">'+meta+'</div>';
+    if(op.raw){ var ins=el("button","ghost","JSON"); ins.style.cssText="margin-top:6px;padding:3px 8px;font-size:11px;"; ins.addEventListener("click",function(ev){ ev.stopPropagation(); inspectActivity(op); }); d.appendChild(ins); }
+    d.addEventListener("click",function(){ setCurrent(op); });
+    c.appendChild(d);
+  });
+}
+function inspectActivity(op){ if(op.raw){ debug(op.raw); var dd=$("dbg"); if(dd) dd.open=true; log("Roh-JSON von „"+(op.subject||op.id)+"“ im Debug-Bereich.","info"); } }
+function renderTech(){
+  var c=$("techList"); c.innerHTML="";
+  if(!S.technicians.length){ c.appendChild(el("div","empty","Keine Techniker geladen.")); return; }
+  S.technicians.forEach(function(t){
+    var sd=!!S.selectedTech[t.id]; var cnt=S.chunks.filter(function(ch){return ch.techId===t.id;}).length;
+    var d=el("div","tech"+(sd?" seld":"")); d.dataset.tech=t.id; d.title="Klicken zum Aus-/Abwählen";
+    d.innerHTML='<span class="dot" style="background:'+t.color+'"></span><span class="name">'+esc(t.name)+'</span><span class="cnt">'+(cnt?cnt+" Chunk(s)":"")+'</span>';
+    d.addEventListener("click",function(){ S.selectedTech[t.id]=!S.selectedTech[t.id]; renderTech(); });
+    c.appendChild(d);
+  });
+}
+
+/* ---------- Aufteilen / Dropzone ---------- */
+function setCurrent(op){
+  S.current=op; S.chunks=[];
+  var dz=$("dz"); dz.classList.add("filled");
+  var warn = op.raw ? (op.raw.object ? "" : " · (KEIN Auftragsbezug – Splits erscheinen NICHT auf der Tafel)") : " · (nur Eckdaten – per Anwahl/ID laden)";
+  dz.innerHTML='<div class="opcard"><div class="t">'+esc(op.subject)+'</div><div class="m">'+fmtH(op.hours)+' h gesamt · '+esc(op.id)+warn+'</div></div>';
+  $("cfg").hidden=false;
+  if(op.raw){
+    var st=op.raw.executionStage||"", stt=op.raw.status||"";
+    var ce=document.getElementById("commitStage"); if(ce) ce.value=st;
+    log("Quelle „"+(op.subject||op.id)+"“: stage="+(st||"—")+" · status="+(stt||"—")+" · type="+(op.raw.type||"—")+" · code="+(op.raw.code||"—"),"info");
+    if(/^DISPATCHING$/i.test(st)||/^DRAFT$/i.test(stt)) log("Achtung: Diese Vorlage ist selbst unplanmäßig (Pool/Entwurf). Wähle als Vorlage einen Vorgang, der OBEN im Gantt auf einem Techniker liegt – dann steht im Feld die richtige executionStage.","warn");
+  }
+  renderChunks(); $("btnCommit").disabled=true;
+}
+function initDropzone(){
+  var dz=$("dz");
+  if(dz && !dz.classList.contains("filled")) dz.innerHTML='<div class="hint" style="color:#7a828f;font-size:13px;">Einen Vorgang oben anklicken, um ihn hier zum Aufteilen zu übernehmen.</div>';
+}
+function splitHours(total,mode){
+  var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];});
+  var parts=[];
+  if(mode==="perTech"){ var n=Math.max(sel.length,1); var baseH=Math.floor((total/n)*2)/2; var acc=0; for(var i=0;i<n;i++){ var h=(i===n-1)?+(total-acc).toFixed(2):baseH; acc+=h; parts.push(h); } }
+  else { var size=mode==="perDay"?CFG.workdayHours:Math.max(parseFloat($("blockH").value)||1,1); var rem=total; while(rem>0.0001){ var hh=Math.min(size,+rem.toFixed(2)); parts.push(+hh.toFixed(2)); rem=+(rem-hh).toFixed(2); } }
+  return parts;
+}
+function doSplit(){
+  if(!S.current) return;
+  var parts=splitHours(S.current.hours,$("mode").value);
+  S.chunks=parts.map(function(h,i){ return {hours:h,techId:null,idx:i,start:null,end:null}; });
+  autoAssign(); renderChunks(); renderTech();
+}
+function autoAssign(){
+  var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];}); if(!sel.length) sel=S.technicians.slice(); if(!sel.length) return;
+  S.chunks.forEach(function(ch,i){ ch.techId=sel[i%sel.length].id; }); renderChunks(); renderTech();
+}
+function snapWork(d){ d=new Date(d);
+  if(d.getHours()<CFG.workdayStart) d.setHours(CFG.workdayStart,0,0,0);
+  if(d.getHours()>=CFG.workdayStart+CFG.workdayHours){ d.setDate(d.getDate()+1); d.setHours(CFG.workdayStart,0,0,0); }
+  while(d.getDay()===0||d.getDay()===6){ d.setDate(d.getDate()+1); d.setHours(CFG.workdayStart,0,0,0); }
+  return d;
+}
+function scheduleChunks(){
+  if(!$("setTimes").checked){ S.chunks.forEach(function(c){c.start=null;c.end=null;}); return; }
+  var sv=$("startDate").value; var d0=sv?new Date(sv+"T00:00:00"):new Date(); var cur={};
+  S.chunks.forEach(function(c){ var k=c.techId||"_";
+    if(!cur[k]){ var b=new Date(d0); b.setHours(CFG.workdayStart,0,0,0); cur[k]=snapWork(b); }
+    var start=snapWork(cur[k]); var end=new Date(start.getTime()+c.hours*3600*1000);
+    c.start=start.toISOString(); c.end=end.toISOString();
+    if(end.getHours()<CFG.workdayStart+CFG.workdayHours){ cur[k]=end; } else { var nx=new Date(end); nx.setDate(nx.getDate()+1); nx.setHours(CFG.workdayStart,0,0,0); cur[k]=snapWork(nx); }
+  });
+}
+function renderChunks(){
+  scheduleChunks();
+  var c=$("chunks"); c.innerHTML="";
+  S.chunks.forEach(function(ch,i){
+    var t=S.technicians.find(function(x){return x.id===ch.techId;}); var color=t?t.color:"#ccc";
+    var d=el("div","chunk"); d.style.borderLeftColor=color;
+    var opts='<option value="">– nicht zugewiesen –</option>'+S.technicians.map(function(x){ return '<option value="'+esc(x.id)+'"'+(x.id===ch.techId?" selected":"")+'>'+esc(x.name)+'</option>'; }).join("");
+    d.innerHTML='<span class="h">'+fmtH(ch.hours)+' h</span>'+
+      '<select class="assign" style="flex:1;min-width:120px;padding:4px 6px;border:1px solid #cdd3dd;border-radius:6px;font-size:12px;">'+opts+'</select>'+
+      (ch.start?('<span class="when">'+fmtDate(ch.start)+'</span>'):'')+
+      '<span class="x" title="Entfernen">×</span>';
+    d.querySelector(".assign").addEventListener("change",function(e){ S.chunks[i].techId=e.target.value||null; renderChunks(); renderTech(); });
+    d.querySelector(".x").addEventListener("click",function(){ S.chunks.splice(i,1); renderChunks(); renderTech(); });
+    c.appendChild(d);
+  });
+  var sum=S.chunks.reduce(function(a,ch){return a+ch.hours;},0); var sl=$("sumline");
+  if(!S.chunks.length){ sl.textContent=""; $("btnCommit").disabled=true; return; }
+  var ok=Math.abs(sum-S.current.hours)<0.01; var all=S.chunks.every(function(ch){return ch.techId;});
+  sl.className="sumline "+(ok?"ok":"bad");
+  sl.textContent=(ok?"✓ ":"⚠ ")+"Summe "+fmtH(sum)+" h von "+fmtH(S.current.hours)+" h"+(all?" · alle zugewiesen":" · nicht alle zugewiesen");
+  $("btnCommit").disabled=!(ok&&all);
+}
+
+/* ---------- Anlage ---------- */
+function buildBody(ch,i,n){
+  var src=(S.current&&S.current.raw)||{}; var body={};
+  CFG.copyFromSource.forEach(function(f){ if(src[f]!=null) body[f]=src[f]; });
+  body.id=uuid();
+  body.type=src.type||"ASSIGNMENT";
+  var baseSubject=(S.current.subject||"Vorgang").split(" – Teil ")[0];
+  body[CFG.fld.subject]=baseSubject+" – Teil "+(i+1)+"/"+n;
+  var mins=Math.round(ch.hours*60);
+  body[CFG.fld.duration]=mins; body.plannedDurationInMinutes=mins; body.plannedDurationType="MANUAL";
+  var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value||"").trim();
+  if(ch.techId){
+    body[CFG.fld.responsibles]=[ch.techId];
+    // status + executionStage von der Quelle geerbt (oben kopiert, z.B. RELEASED/Freigegeben); Stufe per Feld überschreibbar:
+    if(forced) body[CFG.fld.stage]=forced;
+  } else {
+    body[CFG.fld.responsibles]=[];
+    body[CFG.fld.status]="OPEN";
+    body[CFG.fld.stage]=forced||"DISPATCHING";
+  }
+  if(ch.start){ body[CFG.fld.start]=ch.start; body[CFG.fld.end]=ch.end; body[CFG.fld.startActual]=ch.start; body[CFG.fld.endActual]=ch.end; }
+  return body;
+}
+function commit(){
+  $("btnCommit").disabled=true; $("log").innerHTML="";
+  if(!$("setTimes").checked) log("Hinweis: ohne Terminierung erscheinen die Teile evtl. nicht auf der Plantafel.","info");
+  var n=S.chunks.length, done=0, fail=0;
+  function finalize(){ if(done+fail<n) return; log(fail?("Fertig mit "+fail+" Fehler(n).") :("Alle "+done+" Teile angelegt. Plantafel ggf. aktualisieren."), fail?"err":"ok"); if(S.live&&S.sdk){ try{ S.sdk.emit(S.EV.Version1.RELOAD_CONTEXT,{}); }catch(e){} } }
+
+  if(!S.live){
+    S.chunks.forEach(function(ch,i){ var who=(S.technicians.find(function(t){return t.id===ch.techId;})||{}).name||"?"; done++; log("Demo: Teil "+(i+1)+"/"+n+" · "+fmtH(ch.hours)+" h → "+who+(ch.start?(" ("+fmtDate(ch.start)+")"):""),"ok"); finalize(); });
+    return;
+  }
+  resolveVersion("Activity").then(function(v){
+    var dto=v;
+    S.chunks.forEach(function(ch,i){
+      var who=(S.technicians.find(function(t){return t.id===ch.techId;})||{}).name||"?";
+      var body=buildBody(ch,i,n);
+      authedFetch(base()+"/Activity"+qp(dto),{method:"POST",body:JSON.stringify(body)})
+        .then(check("POST")).then(function(){ done++; log("Angelegt: Teil "+(i+1)+"/"+n+" · "+fmtH(ch.hours)+" h → "+who+(ch.start?(" ("+fmtDate(ch.start)+")"):""),"ok"); return readback(body.id,dto,who); })
+        .catch(function(e){ fail++; log("Fehler Teil "+(i+1)+"/"+n+": "+e.message,"err"); })
+        .finally(finalize);
+    });
+  }).catch(function(e){ log("Abbruch: "+e.message,"err"); $("btnCommit").disabled=false; });
+}
+function readback(id,dto,who){
+  return authedFetch(base()+"/Activity/"+id+qp(dto)).then(function(r){ return r.ok?r.json():null; }).then(function(res){
+    if(!res) return; var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
+    var resp=a[CFG.fld.responsibles];
+    log("↳ FSM gespeichert: type="+(a.type||"—")+", status="+(a[CFG.fld.status]||"—")+", code="+(a.code||"—")+", object="+(a.object?"ja":"NEIN")+", stage="+(a[CFG.fld.stage]||"—")+", Verantwortl. "+((resp&&resp.length)?resp.length:"0"),(a.type&&a[CFG.fld.status]&&a.code&&a.object)?"ok":"err");
+  }).catch(function(){});
+}
+function log(msg,cls){ var r=el("div","row "+(cls||"")); r.textContent=msg; $("log").appendChild(r); $("log").scrollTop=$("log").scrollHeight; }
+
+/* ---------- Demo ---------- */
+function demoTech(){ return [{id:"t1",name:"Walter Berger"},{id:"t2",name:"Claudia Wagner"},{id:"t3",name:"Klaus-Peter Schulz"},{id:"t4",name:"Silke Fischer"},{id:"t5",name:"Bruno Moser"}].map(function(t,i){t.color=TECH_COLORS[i%TECH_COLORS.length];return t;}); }
+function demoOps(){ return [{id:"demo-1",subject:"Große Wartung – Drehleiter L32",hours:300},{id:"demo-2",subject:"Pumpenrevision – TLF 4000",hours:120},{id:"demo-3",subject:"Elektrik-Nachrüstung – HLF 20",hours:90}]; }
+
+/* ---------- Events ---------- */
+$("btnRefresh").addEventListener("click",function(){ if(S.live){ requestContext(); log("Auswahl/Token angefordert.","info"); } });
+$("btnLoadOps").addEventListener("click",loadBoardData);
+$("btnLoadTech").addEventListener("click",loadBoardData);
+$("btnDemo").addEventListener("click",function(){ S.operations=demoOps(); renderOps(); if(!S.technicians.length){S.technicians=demoTech();renderTech();} });
+$("btnLoadId").addEventListener("click",function(){ var id=$("opId").value.trim(); if(id) loadActivityById(id,true); });
+$("btnAll").addEventListener("click",function(){ S.technicians.forEach(function(t){S.selectedTech[t.id]=true;}); renderTech(); });
+$("mode").addEventListener("change",function(){ var b=$("mode").value==="block"; $("blockH").hidden=!b; $("blockUnit").hidden=!b; });
+$("setTimes").addEventListener("change",renderChunks);
+$("startDate").addEventListener("change",renderChunks);
+$("btnSplit").addEventListener("click",doSplit);
+$("btnAuto").addEventListener("click",autoAssign);
+$("btnReset").addEventListener("click",function(){ S.current=null; S.chunks=[]; $("dz").className="dz"; $("dz").innerHTML='Vorgang hierher ziehen<br><span style="font-size:11px;">oder in der Liste links anklicken</span>'; $("cfg").hidden=true; $("log").innerHTML=""; });
+$("btnCommit").addEventListener("click",commit);
+
+(function initDate(){ var d=new Date(); function p(n){return(n<10?"0":"")+n;} $("startDate").value=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate()); })();
+initDropzone(); debug("(noch kein Kontext)");
+fetch("./config.json").then(function(r){return r.ok?r.json():{};}).then(function(c){ var u=(c&&c.backendUrl!=null)?String(c.backendUrl).trim():""; if(/your-subdomain|YOUR-SUBDOMAIN|NAME\.workers\.dev/i.test(u)) u=""; BACKEND=u; }).catch(function(){}).then(connect);
+})();
+</script>
+</body>
+</html>
