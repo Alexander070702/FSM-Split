@@ -1,327 +1,434 @@
 <!DOCTYPE html>
-<html>
+<html lang="de">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EvoSplit</title>
-
-  <!-- fsm-shell loaded BEFORE UI5 so its UMD attaches to window.FSMShell -->
-  <script src="https://unpkg.com/fsm-shell@1.20.0/release/fsm-shell-client.js"></script>
-
-  <script
-    id="sap-ui-bootstrap"
-    src="https://sapui5.hana.ondemand.com/resources/sap-ui-core.js"
-    data-sap-ui-theme="sap_horizon"
-    data-sap-ui-libs="sap.m,sap.ui.layout,sap.ui.core"
-    data-sap-ui-compatVersion="edge"
-    data-sap-ui-async="true"
-    data-sap-ui-frameOptions="trusted">
-  </script>
-
-  <script>
-  // ====================================================================
-  // EvoSplit — pick a long activity, split it into smaller activities,
-  // assign each to a technician, create them in one click. Fully static.
-  // ====================================================================
-  sap.ui.getCore().attachInit(function () {
-
-    var JSONModel = sap.ui.model.json.JSONModel;
-    var MessageToast = sap.m.MessageToast;
-    var MessageBox = sap.m.MessageBox;
-
-    var CFG = { activityDtoVersion: "40", personDtoVersion: "26", clientId: "evosplit" };
-    var CTX = null;          // { cloudHost, account, company, token }
-    var inShell = false;
-
-    // ---------- split engine (pure, unit-tested) ----------------------
-    function round(v, d) { d = d == null ? 1 : d; var f = Math.pow(10, d); return Math.round((v + Number.EPSILON) * f) / f; }
-    function distributeByWeight(total, weights, d) {
-      d = d == null ? 1 : d;
-      var sum = weights.reduce(function (a, b) { return a + b; }, 0);
-      if (sum <= 0) throw new Error("Sum of shares must be > 0");
-      var f = Math.pow(10, d);
-      var exact = weights.map(function (w) { return (total * w) / sum; });
-      var floored = exact.map(function (x) { return Math.floor(x * f) / f; });
-      var rem = Math.round((total - floored.reduce(function (a, b) { return a + b; }, 0)) * f);
-      var order = exact.map(function (x, i) { return { i: i, frac: x * f - Math.floor(x * f) }; })
-        .sort(function (a, b) { return b.frac - a.frac; });
-      var res = floored.slice();
-      for (var k = 0; k < order.length && rem > 0; k++) { res[order[k].i] = round(res[order[k].i] + 1 / f, d); rem--; }
-      return res.map(function (x) { return round(x, d); });
-    }
-    function computeSplit(mode, totalWork, parts) {
-      if (!parts.length) throw new Error("Add at least one work package");
-      parts.forEach(function (p, i) { if (!(Number(p.value) > 0)) throw new Error("Row " + (i + 1) + ": value must be > 0"); });
-      var works, total;
-      if (mode === "sequential") {
-        works = parts.map(function (p) { return round(Number(p.value), 1); });
-        total = round(works.reduce(function (a, b) { return a + b; }, 0), 1);
-      } else {
-        total = Number(totalWork);
-        if (!(total > 0)) throw new Error("Percentage mode needs a total work > 0");
-        var pct = parts.reduce(function (a, p) { return a + Number(p.value); }, 0);
-        if (Math.abs(pct - 100) > 0.5) throw new Error("Percentages must sum to 100 (got " + pct + ")");
-        works = distributeByWeight(total, parts.map(function (p) { return Number(p.value); }), 1);
-      }
-      return parts.map(function (p, i) {
-        return {
-          label: p.label || ("Part " + (i + 1)),
-          work: works[i], unit: "H",
-          sharePct: mode === "percentage" ? round(Number(p.value), 2) : round(works[i] / total * 100, 2),
-          technicianId: p.technicianId || "", technicianName: p.technicianName || ""
-        };
-      });
-    }
-    function uuid() { var s = ""; for (var i = 0; i < 32; i++) { s += (Math.random() * 16 | 0).toString(16); } return s.toUpperCase(); }
-
-    // ---------- FSM API ------------------------------------------------
-    function base() { var h = (CTX && CTX.cloudHost) || "eu.fsm.cloud.sap"; return h.indexOf("http") === 0 ? h : "https://" + h; }
-    function headers() { return { "Content-Type": "application/json", "X-Client-ID": CFG.clientId, "X-Client-Version": "1.0.0", "Authorization": "bearer " + (CTX && CTX.token) }; }
-    function firstObj(row) { return row.activity || row.a || row.person || row.p || (row && typeof row === "object" ? row[Object.keys(row)[0]] : row) || row; }
-
-    function createActivity(activity) {
-      var url = base() + "/api/data/v4/Activity?dtos=Activity." + CFG.activityDtoVersion +
-        "&account=" + encodeURIComponent(CTX.account) + "&company=" + encodeURIComponent(CTX.company);
-      return fetch(url, { method: "POST", headers: headers(), body: JSON.stringify(activity) })
-        .then(function (r) {
-          return r.text().then(function (t) {
-            var b; try { b = t ? JSON.parse(t) : {}; } catch (e) { b = { raw: t }; }
-            if (!r.ok) throw new Error("HTTP " + r.status + ": " + ((b && (b.message || (b.error && b.error.message))) || t || r.statusText));
-            return b;
-          });
-        });
-    }
-    function query(coreSQL, dtoRef) {
-      var url = base() + "/api/query/v1?dtos=" + dtoRef;
-      return fetch(url, { method: "POST", headers: headers(), body: JSON.stringify({ query: coreSQL }) })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) { return (d && d.data) || []; });
-    }
-    function loadTechnicians() {
-      if (!inShell || !CTX || !CTX.token) return Promise.resolve();
-      return query("SELECT p.id, p.firstName, p.lastName FROM Person p", "Person." + CFG.personDtoVersion)
-        .then(function (rows) {
-          var techs = rows.map(function (it) { var p = firstObj(it); return { id: p.id, name: ((p.firstName || "") + " " + (p.lastName || "")).trim() || p.id }; })
-            .filter(function (t) { return t.id; });
-          if (techs.length) oModel.setProperty("/technicians", techs);
-        }).catch(function () {});
-    }
-    function loadActivities() {
-      if (!inShell || !CTX || !CTX.token) return Promise.resolve();
-      var sc = oModel.getProperty("/serviceCall");
-      var where = sc ? (" WHERE a.serviceCall = '" + sc + "'") : "";
-      var sql = "SELECT a.id, a.code, a.subject, a.durationInMinutes, a.serviceCall FROM Activity a" + where;
-      return query(sql, "Activity." + CFG.activityDtoVersion)
-        .then(function (rows) {
-          var acts = rows.map(function (it) {
-            var a = firstObj(it);
-            var hrs = a.durationInMinutes ? (" — " + round(a.durationInMinutes / 60, 1) + "h") : "";
-            return { id: a.id, serviceCall: a.serviceCall, durationInMinutes: a.durationInMinutes,
-              label: (a.subject || a.code || a.id) + hrs };
-          }).filter(function (a) { return a.id; });
-          oModel.setProperty("/activities", acts);
-          var pre = oModel.getProperty("/sourceActivity");
-          if (pre) applyActivitySelection(pre);
-        }).catch(function () {});
-    }
-
-    // ---------- pure state transitions (exposed for tests) ------------
-    function applyActivitySelection(activityId) {
-      var list = oModel.getProperty("/activities") || [];
-      var a = list.filter(function (x) { return x.id === activityId; })[0];
-      oModel.setProperty("/selectedActivity", activityId);
-      oModel.setProperty("/sourceActivity", activityId);
-      if (a) {
-        if (a.serviceCall) oModel.setProperty("/serviceCall", a.serviceCall);
-        if (a.durationInMinutes) oModel.setProperty("/totalWork", round(a.durationInMinutes / 60, 1));
-      }
-    }
-
-    // ---------- model --------------------------------------------------
-    var oModel = new JSONModel({
-      mode: "sequential", totalWork: 100, serviceCall: "", sourceActivity: "", selectedActivity: "", dryRun: false,
-      technicians: [], activities: [],
-      parts: [
-        { label: "Mechanics", value: 10, technicianId: "", technicianName: "" },
-        { label: "Electrics", value: 30, technicianId: "", technicianName: "" },
-        { label: "Vehicle assembly", value: 40, technicianId: "", technicianName: "" }
-      ]
-    });
-    var oResultModel = new JSONModel({ items: [] });
-
-    // ---------- handlers ----------------------------------------------
-    function recalcTotal() {
-      if (oModel.getProperty("/mode") === "percentage") return;
-      oModel.setProperty("/totalWork", oModel.getProperty("/parts").reduce(function (a, p) { return a + (Number(p.value) || 0); }, 0));
-    }
-    function onModeChange(e) { var k = e.getParameter("item").getKey(); oModel.setProperty("/mode", k); inTotal.setEnabled(k === "percentage"); recalcTotal(); }
-    function onValueChange() { recalcTotal(); }
-    function onAddRow() { var a = oModel.getProperty("/parts"); a.push({ label: "", value: 0, technicianId: "", technicianName: "" }); oModel.setProperty("/parts", a); }
-    function onRemoveRow(e) { var i = Number(e.getSource().getBindingContext().getPath().split("/").pop()); var a = oModel.getProperty("/parts"); a.splice(i, 1); oModel.setProperty("/parts", a); recalcTotal(); }
-    function onActivityChange(e) {
-      var it = e.getSource().getSelectedItem();
-      if (it) { applyActivitySelection(it.getKey()); }
-      else { oModel.setProperty("/sourceActivity", e.getSource().getValue()); }
-    }
-    function onTechChange(e) {
-      var cb = e.getSource(); var bc = cb.getBindingContext(); if (!bc) return; var path = bc.getPath();
-      var item = cb.getSelectedItem();
-      if (item) { oModel.setProperty(path + "/technicianId", item.getKey()); oModel.setProperty(path + "/technicianName", item.getText()); }
-      else { oModel.setProperty(path + "/technicianId", cb.getValue()); oModel.setProperty(path + "/technicianName", cb.getValue()); }
-    }
-    function showResult(items) { oResultModel.setProperty("/items", items); resultPanel.setVisible(true); }
-
-    function onSplit() {
-      var mode = oModel.getProperty("/mode");
-      var dry = oModel.getProperty("/dryRun");
-      var serviceCall = (oModel.getProperty("/serviceCall") || "").trim();
-      var sourceAct = (oModel.getProperty("/sourceActivity") || "").trim();
-      var parts = oModel.getProperty("/parts");
-
-      var pieces;
-      try { pieces = computeSplit(mode, oModel.getProperty("/totalWork"), parts); }
-      catch (err) { MessageBox.warning(err.message); return Promise.resolve(); }
-
-      var willCreate = inShell && CTX && CTX.token && !dry;
-      if (!willCreate) {
-        showResult(pieces.map(function (p) {
-          return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct,
-            technicianName: p.technicianName || "-", ref: inShell ? "(dry run)" : "(standalone)", status: "SUCCESS" };
-        }));
-        MessageToast.show(inShell ? "Dry run — nothing created" : "Standalone — open inside FSM to create");
-        return Promise.resolve();
-      }
-      if (!serviceCall) { MessageBox.warning("Pick an activity (or enter a Service Call ID) first."); return Promise.resolve(); }
-
-      btnSplit.setBusy(true);
-      var tasks = pieces.map(function (p) {
-        var act = {
-          id: uuid(),
-          code: "EVOSPLIT-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
-          subject: p.label + " (" + p.work + " " + p.unit + ")",
-          serviceCall: serviceCall, type: "ASSIGNMENT",
-          durationInMinutes: Math.round(Number(p.work) * 60),
-          remarks: "EvoSplit " + p.sharePct + "%" + (sourceAct ? " | from activity " + sourceAct : "")
-        };
-        if (p.technicianId) act.responsibles = [p.technicianId];
-        if (sourceAct) act.externalId = "EVOSPLIT-" + sourceAct + "-" + p.label.replace(/\s+/g, "");
-        return createActivity(act)
-          .then(function () { return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct, technicianName: p.technicianName || (p.technicianId || "(unassigned)"), ref: act.id, status: "SUCCESS" }; })
-          .catch(function (err) { return { label: p.label, work: p.work, unit: p.unit, sharePct: p.sharePct, technicianName: p.technicianName || "-", ref: "", status: "ERROR: " + err.message }; });
-      });
-      return Promise.all(tasks).then(function (items) {
-        btnSplit.setBusy(false);
-        showResult(items);
-        var ok = items.filter(function (i) { return i.status === "SUCCESS"; }).length;
-        if (ok === items.length) MessageToast.show("Created & assigned " + ok + " activities");
-        else MessageBox.error((items.length - ok) + " of " + items.length + " failed — see the result table");
-        return items;
-      });
-    }
-
-    // ---------- UI (programmatic) -------------------------------------
-    var contextStrip = new sap.m.MessageStrip({ text: "Running standalone (not inside FSM). The split is computed but nothing is created. Open inside the FSM board to create & assign.", type: "Warning", showIcon: true }).addStyleClass("sapUiSmallMarginBottom");
-
-    var cbActivity = new sap.m.ComboBox({
-      selectedKey: "{/selectedActivity}", value: "{/sourceActivity}", placeholder: "pick the long activity to split",
-      selectionChange: onActivityChange, width: "100%",
-      items: { path: "/activities", template: new sap.ui.core.Item({ key: "{id}", text: "{label}" }) }
-    });
-    var inServiceCall = new sap.m.Input({ value: "{/serviceCall}", placeholder: "auto-fills from the chosen activity" });
-    var segMode = new sap.m.SegmentedButton({ selectedKey: "{/mode}", selectionChange: onModeChange, items: [
-      new sap.m.SegmentedButtonItem({ key: "sequential", text: "By hours" }),
-      new sap.m.SegmentedButtonItem({ key: "percentage", text: "By percentage" })
-    ]});
-    var inTotal = new sap.m.Input({ value: "{/totalWork}", type: "Number", enabled: false });
-    var swDry = new sap.m.Switch({ state: "{/dryRun}" });
-
-    var form = new sap.ui.layout.form.SimpleForm({ editable: true, layout: "ResponsiveGridLayout", labelSpanXL: 4, labelSpanL: 4, labelSpanM: 4, content: [
-      new sap.m.Label({ text: "Activity to split" }), cbActivity,
-      new sap.m.Label({ text: "Service Call (ID)" }), inServiceCall,
-      new sap.m.Label({ text: "Split mode" }), segMode,
-      new sap.m.Label({ text: "Total work (h)" }), inTotal,
-      new sap.m.Label({ text: "Dry run (compute only)" }), swDry
-    ]});
-
-    var partsTable = new sap.m.Table({
-      headerToolbar: new sap.m.Toolbar({ content: [ new sap.m.Title({ text: "Work packages" }), new sap.m.ToolbarSpacer(), new sap.m.Button({ icon: "sap-icon://add", text: "Add package", press: onAddRow }) ] }),
-      columns: [
-        new sap.m.Column({ header: new sap.m.Text({ text: "Description" }) }),
-        new sap.m.Column({ hAlign: "End", width: "7rem", header: new sap.m.Text({ text: "Hours / %" }) }),
-        new sap.m.Column({ header: new sap.m.Text({ text: "Technician" }) }),
-        new sap.m.Column({ hAlign: "Center", width: "3.5rem", header: new sap.m.Text({}) })
-      ]
-    });
-    partsTable.bindItems({ path: "/parts", template: new sap.m.ColumnListItem({ cells: [
-      new sap.m.Input({ value: "{label}" }),
-      new sap.m.Input({ value: "{value}", type: "Number", textAlign: "End", liveChange: onValueChange }),
-      new sap.m.ComboBox({ selectedKey: "{technicianId}", value: "{technicianName}", placeholder: "pick or type a Person ID", selectionChange: onTechChange,
-        items: { path: "/technicians", template: new sap.ui.core.Item({ key: "{id}", text: "{name}" }) } }),
-      new sap.m.Button({ icon: "sap-icon://delete", type: "Transparent", press: onRemoveRow })
-    ]})});
-
-    var btnSplit = new sap.m.Button({ text: "Split & assign", type: "Emphasized", icon: "sap-icon://split", press: onSplit }).addStyleClass("sapUiMediumMarginTop");
-
-    var resultTable = new sap.m.Table({ columns: [
-      new sap.m.Column({ header: new sap.m.Text({ text: "Description" }) }),
-      new sap.m.Column({ hAlign: "End", header: new sap.m.Text({ text: "Work" }) }),
-      new sap.m.Column({ hAlign: "End", header: new sap.m.Text({ text: "Share %" }) }),
-      new sap.m.Column({ header: new sap.m.Text({ text: "Technician" }) }),
-      new sap.m.Column({ header: new sap.m.Text({ text: "Activity / status" }) })
-    ]});
-    resultTable.bindItems({ path: "result>/items", template: new sap.m.ColumnListItem({ cells: [
-      new sap.m.Text({ text: "{result>label}" }),
-      new sap.m.ObjectNumber({ number: "{result>work}", unit: "{result>unit}" }),
-      new sap.m.Text({ text: "{result>sharePct}" }),
-      new sap.m.Text({ text: "{result>technicianName}" }),
-      new sap.m.ObjectStatus({ text: { parts: ["result>status", "result>ref"], formatter: function (s, r) { return s === "SUCCESS" ? r : s; } }, state: { path: "result>status", formatter: function (s) { return s === "SUCCESS" ? "Success" : "Error"; } } })
-    ]})});
-    var resultPanel = new sap.m.Panel({ headerText: "Result", visible: false, content: [resultTable] }).addStyleClass("sapUiMediumMarginTop");
-
-    var page = new sap.m.Page({ title: "EvoSplit", content: [contextStrip, form, partsTable, btnSplit, resultPanel] }).addStyleClass("sapUiContentPadding");
-    var app = new sap.m.App({ pages: [page] });
-    app.setModel(oModel);
-    app.setModel(oResultModel, "result");
-    app.placeAt("content");
-
-    // ---------- config + shell connect --------------------------------
-    fetch("./config.json").then(function (r) { return r.ok ? r.json() : {}; }).then(function (c) { if (c) Object.assign(CFG, c); }).catch(function () {}).then(initShell);
-
-    function initShell() {
-      try {
-        if (!window.FSMShell || !FSMShell.ShellSdk || !FSMShell.ShellSdk.isInsideShell()) return;
-        var EV = FSMShell.SHELL_EVENTS;
-        var sdk = FSMShell.ShellSdk.init(parent, "*");
-        sdk.on(EV.Version1.REQUIRE_CONTEXT, function (ev) {
-          var c; try { c = typeof ev === "string" ? JSON.parse(ev) : ev; } catch (e) { return; }
-          inShell = true;
-          CTX = { cloudHost: c.cloudHost, account: c.account, company: c.company, token: c.auth && c.auth.access_token };
-          var sc = c.selectedServiceCall || (c.selectedActivities && c.selectedActivities.serviceCall) || "";
-          if (sc) oModel.setProperty("/serviceCall", sc);
-          var sa = (c.selectedActivities && (c.selectedActivities.id || c.selectedActivities.code)) || "";
-          if (sa) oModel.setProperty("/sourceActivity", sa);
-          contextStrip.setType("Success").setText("Connected to FSM (" + c.account + " / " + c.company + "). Pick an activity, assign technicians, then Split & assign.");
-          loadTechnicians();
-          loadActivities();
-        });
-        sdk.emit(EV.Version1.REQUIRE_CONTEXT, { clientIdentifier: CFG.clientId, auth: { response_type: "token" } });
-      } catch (e) { /* standalone */ }
-    }
-
-    // ---------- test seam (no effect in production) -------------------
-    if (typeof window !== "undefined" && window.__EVOSPLIT_TEST__) {
-      window.__evosplit = {
-        computeSplit: computeSplit, distributeByWeight: distributeByWeight, round: round,
-        onSplit: onSplit, applyActivitySelection: applyActivitySelection,
-        loadTechnicians: loadTechnicians, loadActivities: loadActivities,
-        oModel: oModel, oResultModel: oResultModel,
-        getCtx: function () { return CTX; }, isInShell: function () { return inShell; }
-      };
-    }
-  });
-  </script>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>EVOSPLIT – Vorgänge aufteilen &amp; zuweisen</title>
+<style>
+  :root{--bg:#fff;--panel:#f7f8fa;--line:#e3e6ea;--fg:#1d2d3e;--muted:#67717c;
+    --blue:#0a6ed1;--blue-d:#0856a8;--amber:#f6a800;--ok:#107e3e;--err:#bb0000;--radius:10px;--shadow:0 1px 3px rgba(0,0,0,.08);}
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:"72","Segoe UI",Roboto,Arial,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:1.45;}
+  .app{padding:14px;}
+  header.top{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+  header.top h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.2px;}
+  .badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;}
+  .badge.ok{background:#ebf5ec;color:var(--ok);} .badge.warn{background:#fef3da;color:#8a5d00;} .badge.err{background:#ffebeb;color:var(--err);}
+  .sub{color:var(--muted);font-size:12px;margin:0 0 12px;}
+  .grid{display:flex;flex-direction:column;gap:12px;}
+  @media(max-width:920px){.grid{grid-template-columns:1fr;}}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px;min-height:120px;}
+  .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:0 0 10px;font-weight:700;}
+  .toolbar{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+  button{font-family:inherit;font-size:12px;font-weight:600;border:1px solid var(--line);background:#fff;color:var(--fg);padding:7px 11px;border-radius:7px;cursor:pointer;transition:.12s;}
+  button:hover{border-color:#c3c9d0;} button.primary{background:var(--blue);border-color:var(--blue);color:#fff;} button.primary:hover{background:var(--blue-d);}
+  button.primary:disabled{background:#aab4bf;border-color:#aab4bf;cursor:default;} button.ghost{background:transparent;}
+  .sel{background:#eaf3fc;border:1px solid #b8d8f5;border-radius:8px;padding:9px 10px;margin-bottom:10px;}
+  .sel .lbl{font-size:11px;font-weight:700;color:var(--blue-d);text-transform:uppercase;letter-spacing:.5px;}
+  .sel .t{font-weight:700;margin:2px 0;}
+  .op{background:#fff;border:1px solid var(--line);border-left:4px solid var(--blue);border-radius:8px;padding:9px 10px;margin-bottom:8px;cursor:grab;box-shadow:var(--shadow);}
+  .op:active{cursor:grabbing;} .op .t{font-weight:700;} .op .m{color:var(--muted);font-size:12px;}
+  .empty{color:var(--muted);font-size:12px;border:1px dashed var(--line);border-radius:8px;padding:14px;text-align:center;}
+  .dz{border:2px dashed #c3c9d0;border-radius:10px;padding:26px 14px;min-height:88px;text-align:center;color:var(--muted);transition:.12s;background:#fff;}
+  .dz.hot{border-color:var(--blue);background:#eaf3fc;color:var(--blue-d);} .dz.filled{border-style:solid;border-color:var(--line);text-align:left;color:var(--fg);padding:14px;}
+  .opcard .t{font-weight:700;font-size:14px;} .opcard .m{color:var(--muted);}
+  .cfg{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0;}
+  .cfg label{color:var(--muted);font-size:12px;}
+  select,input[type=number],input[type=text],input[type=date]{font-family:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--fg);}
+  input[type=number]{width:84px;}
+  .chunks{margin-top:10px;display:flex;flex-direction:column;gap:7px;}
+  .chunk{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);border-left:5px solid #ccc;border-radius:8px;padding:7px 9px;cursor:grab;}
+  .chunk .h{font-weight:700;min-width:52px;} .chunk .who{flex:1;color:var(--muted);} .chunk .who.assigned{color:var(--fg);font-weight:600;}
+  .chunk .when{color:var(--muted);font-size:11px;white-space:nowrap;} .chunk .x{cursor:pointer;color:var(--muted);font-weight:700;padding:0 4px;}
+  .sumline{font-size:12px;margin-top:8px;} .sumline.ok{color:var(--ok);} .sumline.bad{color:var(--err);}
+  .tech{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:7px;cursor:pointer;}
+  .tech.seld{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue) inset;} .tech.hot{background:#eaf3fc;border-color:var(--blue);}
+  .dot{width:12px;height:12px;border-radius:50%;flex:0 0 auto;} .tech .name{flex:1;font-weight:600;} .tech .cnt{color:var(--muted);font-size:12px;}
+  .actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;}
+  .log{margin-top:12px;font-size:12px;max-height:240px;overflow:auto;}
+  .log .row{padding:5px 8px;border-radius:6px;margin-bottom:5px;}
+  .log .row.ok{background:#ebf5ec;color:#0c5c2e;} .log .row.err{background:#ffebeb;color:var(--err);} .log .row.info{background:#eef1f4;color:var(--muted);}
+  details{margin-top:14px;font-size:12px;color:var(--muted);} pre{background:#f1f3f5;padding:10px;border-radius:8px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-all;}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px;}
+</style>
 </head>
-<body class="sapUiBody" style="margin:0;height:100%">
-  <div id="content" style="height:100%"></div>
+<body>
+<div class="app">
+  <header class="top"><h1>EVOSPLIT</h1><span id="conn" class="badge warn">verbinde…</span>
+    <button id="btnRefresh" class="ghost" style="margin-left:auto;">Auswahl &amp; Token aktualisieren</button>
+  </header>
+  <div class="sub">Vorgang aus FSM wählen oder laden, Stunden automatisch aufteilen, terminieren und Technikern zuweisen.</div>
+
+  <div class="grid">
+    <section class="col" style="order:1">
+      <h2>Vorgänge</h2>
+      <div id="selBox"></div>
+      <div class="toolbar"><button id="btnLoadOps">Plantafel laden</button><button id="btnDemo" class="ghost">Beispieldaten</button></div>
+      <div class="toolbar"><input id="opId" type="text" placeholder="Activity-ID …" style="flex:1;min-width:120px;"/><button id="btnLoadId">Laden</button></div>
+      <div id="opList"></div>
+      <div class="hint">Liste = geplante Vorgänge von der Plantafel. „JSON ansehen" zeigt die Rohdaten eines Vorgangs (zum Abgleich).</div>
+    </section>
+
+    <section class="col" style="order:3">
+      <h2>Aufteilen</h2>
+      <div id="dz" class="dz">Vorgang hierher ziehen<br><span style="font-size:11px;">oder in der Liste links anklicken</span></div>
+      <div id="cfg" hidden>
+        <div class="cfg">
+          <label>Methode</label>
+          <select id="mode"><option value="perTech">Gleichmäßig auf Techniker</option><option value="block">Blöcke à</option><option value="perDay">Pro Arbeitstag (8 h)</option></select>
+          <input id="blockH" type="number" min="1" step="1" value="40" hidden/><span id="blockUnit" class="hint" hidden>Stunden</span>
+        </div>
+        <div class="cfg">
+          <label><input type="checkbox" id="setTimes" checked/> Terminieren ab</label>
+          <input id="startDate" type="date"/>
+          <span class="hint">08–16 Uhr, Wochenende übersprungen</span>
+        </div>
+        <div class="cfg"><label>Status beim Anlegen</label>
+          <select id="commitStage"><option value="DISPATCHED">Geplant (DISPATCHED)</option><option value="EXECUTION">In Ausführung (EXECUTION)</option><option value="DISPATCHING">Dispatch-Pool (DISPATCHING)</option></select></div>
+        <button id="btnSplit" class="primary">Aufteilen, terminieren &amp; zuweisen</button>
+        <div id="chunks" class="chunks"></div>
+        <div id="sumline" class="sumline"></div>
+        <div class="actions">
+          <button id="btnAuto">Automatisch zuweisen</button>
+          <button id="btnCommit" class="primary" disabled>Auf Plantafel anlegen</button>
+          <button id="btnReset" class="ghost">Zurücksetzen</button>
+        </div>
+        <div id="log" class="log"></div>
+      </div>
+    </section>
+
+    <section class="col" style="order:2">
+      <h2>Techniker</h2>
+      <div class="toolbar"><button id="btnLoadTech">Plantafel laden</button><button id="btnAll" class="ghost">Alle wählen</button></div>
+      <div id="techList"></div>
+      <div class="hint">Klick = für Aufteilung auswählen. Chunk auf Techniker ziehen = manuell zuweisen.</div>
+    </section>
+  </div>
+
+  <details id="dbg"><summary>Konfiguration &amp; Debug</summary><pre id="dbgPre">–</pre></details>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/fsm-shell@1.27.1/release/fsm-shell-client.js" onerror="window.__sdkFailed=true"></script>
+<script>
+(function(){
+"use strict";
+
+// Base URL of the CAP backend (FSM proxy). "" = same origin (the CAP app serves
+// this page). Overridable via config.json -> backendUrl.
+var BACKEND = "";
+
+var CFG = {
+  clientIdentifier:"split-extension", clientVersion:"1.0.0",
+  fld:{ duration:"durationInMinutes", subject:"subject", responsibles:"responsibles",
+        object:"object", businessPartner:"businessPartner", location:"location",
+        start:"earliestStartDateTime", end:"dueDateTime", startActual:"startDateTime", endActual:"endDateTime", stage:"executionStage", status:"status" },
+  // Vom Originalvorgang zu übernehmende Verknüpfungsfelder (für Plantafel-Sichtbarkeit/Auftrag):
+  copyFromSource:["object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope"],
+  assignedStage:"DISPATCHED", workdayStart:8, workdayHours:8,
+  qTechnicians:"SELECT p.id, p.firstName, p.lastName FROM Person p",
+  qOpenOps:"SELECT a.id, a.subject, a.durationInMinutes FROM Activity a"
+};
+var TECH_COLORS=["#0a6ed1","#107e3e","#e9730c","#7858a8","#188918","#c0399f","#0f828f","#d04343"];
+
+var S={ live:false, token:null, cloudHost:null, account:null, company:null,
+        operations:[], technicians:[], selectedTech:{}, current:null, chunks:[],
+        ver:{}, drag:null, selectedId:null, authWaiters:[] };
+
+var $=function(id){return document.getElementById(id);};
+function el(tag,cls,html){var e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;}
+function fmtH(h){return Math.round(h*100)/100;}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function setBadge(t,c){var b=$("conn");b.textContent=t;b.className="badge "+c;}
+function debug(o){ $("dbgPre").textContent="Kontext / Zustand:\n"+(typeof o==="string"?o:JSON.stringify(o,null,2)); }
+function parseMaybe(p){try{return typeof p==="string"?JSON.parse(p):p;}catch(e){return p||{};}}
+var WD=["So","Mo","Di","Mi","Do","Fr","Sa"];
+function fmtDate(iso){ if(!iso)return""; var d=new Date(iso); function p(n){return(n<10?"0":"")+n;} return WD[d.getDay()]+" "+p(d.getDate())+"."+p(d.getMonth()+1)+". "+p(d.getHours())+":"+p(d.getMinutes()); }
+
+/* ---------- Shell Handshake ---------- */
+function connect(){
+  if(window.__sdkFailed||typeof FSMShell==="undefined"){ goLive(); return; }
+  var ShellSdk=FSMShell.ShellSdk, EV=FSMShell.SHELL_EVENTS;
+  if(!ShellSdk.isInsideShell()){ goLive(); return; }
+  var sdk; try{ sdk=ShellSdk.init(parent,"*"); }catch(e){ try{ sdk=ShellSdk.init(parent); }catch(e2){ goLive(); return; } }
+  S.sdk=sdk; S.EV=EV;
+  sdk.on(EV.Version1.REQUIRE_CONTEXT,function(ev){
+    var c=parseMaybe(ev); debug(c);
+    S.cloudHost=c.cloudHost||S.cloudHost; S.account=c.account||S.account; S.company=c.company||S.company;
+    var vs=parseMaybe(c.viewState||{});
+    var sel=(c.selectedActivities&&c.selectedActivities[0])||c.selectedActivityId||c.activityId||(vs&&(vs.activityId||vs.selectedActivityId||(vs.selectedSidebar&&vs.selectedSidebar.id)||vs.id))||null;
+    if(!sel){ var mm=(location.search+location.hash).match(/(?:activityId|activity|id)=([0-9a-fA-F-]{8,})/); if(mm) sel=mm[1]; }
+    if(sel && sel!==S.selectedId){ S.selectedId=sel; renderSelected(); if(S.live) loadActivityById(sel,true); }
+    afterHandshake();
+  });
+  sdk.on(EV.Version1.REQUIRE_AUTHENTICATION,function(ev){
+    var a=parseMaybe(ev); var tok=a.access_token||a.token||(a.auth&&a.auth.access_token);
+    if(tok) S.token=tok;
+    var w=S.authWaiters; S.authWaiters=[]; w.forEach(function(fn){fn(S.token);});
+    afterHandshake();
+  });
+  requestContext();
+  setBadge("Handshake…","warn");
+}
+function requestContext(){
+  try{
+    S.sdk.emit(S.EV.Version1.REQUIRE_CONTEXT,{clientIdentifier:CFG.clientIdentifier,auth:{response_type:"token"}});
+    S.sdk.emit(S.EV.Version1.REQUIRE_AUTHENTICATION,{response_type:"token"});
+  }catch(e){}
+}
+var handshakeDone=false;
+function goLive(){
+  if(handshakeDone) return; handshakeDone=true; S.live=true;
+  setBadge("Verbunden über Backend"+(S.account?(" · "+S.account+" / "+S.company):""),"ok");
+  loadBoardData();
+  if(S.selectedId) loadActivityById(S.selectedId,true);
+}
+function afterHandshake(){ goLive(); }
+function enterDemo(reason){
+  S.live=false; handshakeDone=true; setBadge("Demo-Modus ("+reason+")","warn"); debug("Demo-Modus: "+reason);
+  S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps();
+}
+function refreshToken(){ return new Promise(function(res){ S.authWaiters.push(res); try{ S.sdk.emit(S.EV.Version1.REQUIRE_AUTHENTICATION,{response_type:"token"}); }catch(e){ res(S.token); } setTimeout(function(){ res(S.token); },4000); }); }
+
+/* ---------- API ---------- */
+function base(){return BACKEND+"/fsm/data/v4";}
+function qbase(){return BACKEND+"/fsm/query/v1";}
+function qp(dto){return "?account="+encodeURIComponent(S.account)+"&company="+encodeURIComponent(S.company)+(dto?("&dtos="+encodeURIComponent(dto)):"");}
+function hdr(){return {"Content-Type":"application/json","Accept":"application/json","X-Client-Id":CFG.clientIdentifier,"X-Client-Version":CFG.clientVersion};}
+function check(label){return function(r){ if(r.ok) return r; return r.text().then(function(b){ throw new Error(label+" "+r.status+(b?(": "+b.replace(/\s+/g," ").slice(0,500)):"")); }); };}
+function uuid(){return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==="x"?r:(r&0x3|0x8);return v.toString(16);});}
+function authedFetch(url,opts){ opts=opts||{}; opts.headers=hdr(); return fetch(url,opts).then(function(r){ if(r.status!==401) return r; return refreshToken().then(function(){ opts.headers=hdr(); return fetch(url,opts); }); }); }
+function runQuery(sql,dto){ return authedFetch(qbase()+qp(dto),{method:"POST",body:JSON.stringify({query:sql})}).then(check("Query")).then(function(r){return r.json();}); }
+function rows(res){ var d=res&&res.data?res.data:[]; return d.map(function(row){ if(row&&typeof row==="object"&&!Array.isArray(row)){ var k=Object.keys(row); if(k.length===1&&row[k[0]]&&typeof row[k[0]]==="object") return row[k[0]]; } return row; }); }
+function resolveVersion(object){
+  if(S.ver[object]) return Promise.resolve(S.ver[object]);
+  var versions=[50,48,46,45,44,43,42,41,40,39,38,37,36,35,34,33,32,31,30,28,26,24,22,21,20,18,16,14,12,10];
+  var q=JSON.stringify({query:"SELECT x.id FROM "+object+" x"});
+  return Promise.all(versions.map(function(v){ return fetch(qbase()+qp(object+"."+v),{method:"POST",headers:hdr(),body:q}).then(function(r){return {v:v,ok:r.ok};}).catch(function(){return {v:v,ok:false};}); }))
+    .then(function(res){ var ok=res.filter(function(x){return x.ok;}).map(function(x){return x.v;}); if(!ok.length) throw new Error("Keine gültige DTO-Version für "+object+" (Auth/CORS/Endpoint prüfen)."); S.ver[object]=Math.max.apply(null,ok); log("DTO-Version "+object+"."+S.ver[object]+" erkannt.","info"); return S.ver[object]; });
+}
+
+function loadBoardData(){
+  if(!S.live){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); return; }
+  log("Lade Plantafel-Daten…","info");
+  var AV, PV, nameById={};
+  Promise.all([resolveVersion("Activity"), resolveVersion("Person")])
+   .then(function(vv){ AV="Activity."+vv[0]; PV="Person."+vv[1];
+     return runQuery("SELECT p.id, p.firstName, p.lastName FROM Person p", PV); })
+   .then(function(res){ rows(res).forEach(function(p){ nameById[p.id]=((p.firstName||"")+" "+(p.lastName||"")).trim()||p.id; });
+     return runQuery("SELECT a.id, a.subject, a.durationInMinutes, a.startDateTime FROM Activity a", AV); })
+   .then(function(res){
+     var planned=rows(res).filter(function(a){ return a.startDateTime; });
+     planned.sort(function(x,y){ return (y.startDateTime||"").localeCompare(x.startDateTime||""); });
+     planned=planned.slice(0,40);
+     // Vollobjekte laden (für Verantwortliche + Verknüpfungen + Rohdaten)
+     return Promise.all(planned.map(function(a){
+       return authedFetch(base()+"/Activity/"+a.id+qp(AV)).then(function(r){ return r.ok?r.json():null; })
+         .then(function(d){ return d?((d.data&&d.data[0]&&d.data[0].activity)||d.activity||d):a; }).catch(function(){ return a; });
+     }));
+   })
+   .then(function(fulls){
+     var real=fulls.filter(function(a){ return a.object && a.code; });   // echte Vorgänge: Auftragsbezug + Nummer (Geister-Inserts ausblenden)
+     S.operations=real.map(function(a){ return {id:a.id, subject:a.subject||a.id, hours:(a.durationInMinutes||0)/60, start:a.startDateTime, raw:a}; });
+     var techIds={}; real.forEach(function(a){ (a.responsibles||[]).forEach(function(id){ techIds[id]=true; }); });
+     var ids=Object.keys(techIds);
+     S.technicians = ids.length ? ids.map(function(id,i){ return {id:id, name:nameById[id]||id, color:TECH_COLORS[i%TECH_COLORS.length]}; })
+                                : Object.keys(nameById).slice(0,25).map(function(id,i){ return {id:id, name:nameById[id], color:TECH_COLORS[i%TECH_COLORS.length]}; });
+     renderTech(); renderOps();
+     log("Plantafel: "+S.operations.length+" echte Vorgänge (mit Auftrag), "+S.technicians.length+" Techniker.","ok");
+   })
+   .catch(function(e){ S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps(); log("Plantafel-Daten nicht abrufbar ("+e.message+") – Beispieldaten.","err"); });
+}
+function loadActivityById(id,asSelected){
+  if(!S.live){ var d=demoOps().find(function(o){return o.id===id;})||{id:id,subject:"Demo "+id,hours:100}; addOp(d); if(asSelected) setCurrent(d); return; }
+  resolveVersion("Activity").then(function(v){ return authedFetch(base()+"/Activity/"+id+qp("Activity."+v)); }).then(check("GET Activity")).then(function(r){return r.json();})
+    .then(function(res){ var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
+      var op={id:a.id,subject:a[CFG.fld.subject]||a.id,hours:(a[CFG.fld.duration]||0)/60,raw:a};
+      addOp(op); if(asSelected) setCurrent(op); })
+    .catch(function(e){ log("Vorgang "+id+" nicht ladbar: "+e.message,"err"); });
+}
+function addOp(op){ var i=S.operations.findIndex(function(o){return o.id===op.id;}); if(i>=0) S.operations[i]=op; else S.operations.unshift(op); renderOps(); }
+
+/* ---------- Render ---------- */
+function renderSelected(){
+  var c=$("selBox"); c.innerHTML="";
+  if(!S.selectedId) return;
+  var d=el("div","sel");
+  d.innerHTML='<div class="lbl">Aktuell in FSM gewählt</div><div class="t">'+esc(S.selectedId)+'</div>';
+  var b=el("button","primary","Laden &amp; übernehmen"); b.style.marginTop="4px";
+  b.addEventListener("click",function(){ loadActivityById(S.selectedId,true); });
+  d.appendChild(b); c.appendChild(d);
+}
+function renderOps(){
+  var c=$("opList"); c.innerHTML="";
+  if(!S.operations.length){ c.appendChild(el("div","empty","Noch keine Vorgänge. „Plantafel laden“, per ID laden oder Beispieldaten.")); return; }
+  S.operations.forEach(function(op){
+    var d=el("div","op"); d.draggable=true; d.title="Ziehen oder klicken zum Aufteilen";
+    var meta=fmtH(op.hours)+' h'+(op.start?(' · '+fmtDate(op.start)):'');
+    d.innerHTML='<div class="t">'+esc(op.subject)+'</div><div class="m">'+meta+'</div>';
+    if(op.raw){ var ins=el("button","ghost","JSON ansehen"); ins.style.cssText="margin-top:6px;padding:3px 8px;font-size:11px;"; ins.addEventListener("click",function(ev){ ev.stopPropagation(); inspectActivity(op); }); d.appendChild(ins); }
+    d.addEventListener("dragstart",function(e){ S.drag={kind:"op",id:op.id}; try{e.dataTransfer.setData("text/plain",op.id);}catch(_){} e.dataTransfer.effectAllowed="copyMove"; });
+    d.addEventListener("dragend",function(){ S.drag=null; });
+    d.addEventListener("click",function(){ setCurrent(op); });
+    c.appendChild(d);
+  });
+}
+function inspectActivity(op){ if(op.raw){ debug(op.raw); var dd=$("dbg"); if(dd) dd.open=true; log("Roh-JSON von „"+(op.subject||op.id)+"“ im Debug-Bereich.","info"); } }
+function renderTech(){
+  var c=$("techList"); c.innerHTML="";
+  if(!S.technicians.length){ c.appendChild(el("div","empty","Keine Techniker geladen.")); return; }
+  S.technicians.forEach(function(t){
+    var sd=!!S.selectedTech[t.id]; var cnt=S.chunks.filter(function(ch){return ch.techId===t.id;}).length;
+    var d=el("div","tech"+(sd?" seld":"")); d.dataset.tech=t.id;
+    d.innerHTML='<span class="dot" style="background:'+t.color+'"></span><span class="name">'+esc(t.name)+'</span><span class="cnt">'+(cnt?cnt+" Chunk(s)":"")+'</span>';
+    d.addEventListener("click",function(){ S.selectedTech[t.id]=!S.selectedTech[t.id]; renderTech(); });
+    d.addEventListener("dragover",function(e){ e.preventDefault(); if(S.drag&&S.drag.kind==="chunk") d.classList.add("hot"); });
+    d.addEventListener("dragleave",function(){ d.classList.remove("hot"); });
+    d.addEventListener("drop",function(e){ e.preventDefault(); d.classList.remove("hot"); if(S.drag&&S.drag.kind==="chunk"){ S.chunks[S.drag.idx].techId=t.id; S.drag=null; renderChunks(); renderTech(); } });
+    c.appendChild(d);
+  });
+}
+
+/* ---------- Aufteilen / Dropzone ---------- */
+function setCurrent(op){
+  S.current=op; S.chunks=[];
+  var dz=$("dz"); dz.classList.add("filled");
+  var warn = op.raw ? (op.raw.object ? "" : " · (KEIN Auftragsbezug – Splits erscheinen NICHT auf der Tafel)") : " · (nur Eckdaten – per Anwahl/ID laden)";
+  dz.innerHTML='<div class="opcard"><div class="t">'+esc(op.subject)+'</div><div class="m">'+fmtH(op.hours)+' h gesamt · '+esc(op.id)+warn+'</div></div>';
+  $("cfg").hidden=false; renderChunks(); $("btnCommit").disabled=true;
+}
+function initDropzone(){
+  var dz=$("dz");
+  dz.addEventListener("dragover",function(e){ e.preventDefault(); if(S.drag&&S.drag.kind==="op") dz.classList.add("hot"); });
+  dz.addEventListener("dragleave",function(){ dz.classList.remove("hot"); });
+  dz.addEventListener("drop",function(e){ e.preventDefault(); dz.classList.remove("hot"); var id=(S.drag&&S.drag.kind==="op")?S.drag.id:e.dataTransfer.getData("text/plain"); var op=S.operations.find(function(o){return o.id===id;}); if(op) setCurrent(op); S.drag=null; });
+}
+function splitHours(total,mode){
+  var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];});
+  var parts=[];
+  if(mode==="perTech"){ var n=Math.max(sel.length,1); var baseH=Math.floor((total/n)*2)/2; var acc=0; for(var i=0;i<n;i++){ var h=(i===n-1)?+(total-acc).toFixed(2):baseH; acc+=h; parts.push(h); } }
+  else { var size=mode==="perDay"?CFG.workdayHours:Math.max(parseFloat($("blockH").value)||1,1); var rem=total; while(rem>0.0001){ var hh=Math.min(size,+rem.toFixed(2)); parts.push(+hh.toFixed(2)); rem=+(rem-hh).toFixed(2); } }
+  return parts;
+}
+function doSplit(){
+  if(!S.current) return;
+  var parts=splitHours(S.current.hours,$("mode").value);
+  S.chunks=parts.map(function(h,i){ return {hours:h,techId:null,idx:i,start:null,end:null}; });
+  autoAssign(); renderChunks(); renderTech();
+}
+function autoAssign(){
+  var sel=S.technicians.filter(function(t){return S.selectedTech[t.id];}); if(!sel.length) sel=S.technicians.slice(); if(!sel.length) return;
+  S.chunks.forEach(function(ch,i){ ch.techId=sel[i%sel.length].id; }); renderChunks(); renderTech();
+}
+function snapWork(d){ d=new Date(d);
+  if(d.getHours()<CFG.workdayStart) d.setHours(CFG.workdayStart,0,0,0);
+  if(d.getHours()>=CFG.workdayStart+CFG.workdayHours){ d.setDate(d.getDate()+1); d.setHours(CFG.workdayStart,0,0,0); }
+  while(d.getDay()===0||d.getDay()===6){ d.setDate(d.getDate()+1); d.setHours(CFG.workdayStart,0,0,0); }
+  return d;
+}
+function scheduleChunks(){
+  if(!$("setTimes").checked){ S.chunks.forEach(function(c){c.start=null;c.end=null;}); return; }
+  var sv=$("startDate").value; var d0=sv?new Date(sv+"T00:00:00"):new Date(); var cur={};
+  S.chunks.forEach(function(c){ var k=c.techId||"_";
+    if(!cur[k]){ var b=new Date(d0); b.setHours(CFG.workdayStart,0,0,0); cur[k]=snapWork(b); }
+    var start=snapWork(cur[k]); var end=new Date(start.getTime()+c.hours*3600*1000);
+    c.start=start.toISOString(); c.end=end.toISOString();
+    if(end.getHours()<CFG.workdayStart+CFG.workdayHours){ cur[k]=end; } else { var nx=new Date(end); nx.setDate(nx.getDate()+1); nx.setHours(CFG.workdayStart,0,0,0); cur[k]=snapWork(nx); }
+  });
+}
+function renderChunks(){
+  scheduleChunks();
+  var c=$("chunks"); c.innerHTML="";
+  S.chunks.forEach(function(ch,i){
+    var t=S.technicians.find(function(x){return x.id===ch.techId;}); var color=t?t.color:"#ccc";
+    var d=el("div","chunk"); d.draggable=true; d.style.borderLeftColor=color;
+    d.innerHTML='<span class="h">'+fmtH(ch.hours)+' h</span>'+
+      '<span class="who '+(t?"assigned":"")+'">'+(t?('<span class="dot" style="display:inline-block;background:'+color+';margin-right:6px;"></span>'+esc(t.name)):"– nicht zugewiesen –")+'</span>'+
+      (ch.start?('<span class="when">'+fmtDate(ch.start)+'</span>'):'')+
+      '<span class="x" title="Entfernen">×</span>';
+    d.addEventListener("dragstart",function(e){ S.drag={kind:"chunk",idx:i}; try{e.dataTransfer.setData("text/plain","chunk");}catch(_){} });
+    d.addEventListener("dragend",function(){ S.drag=null; });
+    d.querySelector(".x").addEventListener("click",function(){ S.chunks.splice(i,1); renderChunks(); renderTech(); });
+    c.appendChild(d);
+  });
+  var sum=S.chunks.reduce(function(a,ch){return a+ch.hours;},0); var sl=$("sumline");
+  if(!S.chunks.length){ sl.textContent=""; $("btnCommit").disabled=true; return; }
+  var ok=Math.abs(sum-S.current.hours)<0.01; var all=S.chunks.every(function(ch){return ch.techId;});
+  sl.className="sumline "+(ok?"ok":"bad");
+  sl.textContent=(ok?"✓ ":"⚠ ")+"Summe "+fmtH(sum)+" h von "+fmtH(S.current.hours)+" h"+(all?" · alle zugewiesen":" · nicht alle zugewiesen");
+  $("btnCommit").disabled=!(ok&&all);
+}
+
+/* ---------- Anlage ---------- */
+function buildBody(ch,i,n){
+  var src=(S.current&&S.current.raw)||{}; var body={};
+  CFG.copyFromSource.forEach(function(f){ if(src[f]!=null) body[f]=src[f]; });
+  body.id=uuid();
+  body.type="ASSIGNMENT";
+  var baseSubject=(S.current.subject||"Vorgang").split(" – Teil ")[0];
+  body[CFG.fld.subject]=baseSubject+" – Teil "+(i+1)+"/"+n;
+  var mins=Math.round(ch.hours*60);
+  body[CFG.fld.duration]=mins; body.plannedDurationInMinutes=mins; body.plannedDurationType="MANUAL";
+  body[CFG.fld.responsibles]=ch.techId?[ch.techId]:[];
+  body[CFG.fld.status]=ch.techId?"OPEN":"DRAFT";   // OPEN => auf der Plantafel sichtbar (DRAFT bleibt verborgen)
+  var stgEl=document.getElementById("commitStage"); var stg=(stgEl&&stgEl.value)||CFG.assignedStage;
+  body[CFG.fld.stage]=ch.techId?stg:"DISPATCHING";
+  if(ch.start){ body[CFG.fld.start]=ch.start; body[CFG.fld.end]=ch.end; body[CFG.fld.startActual]=ch.start; body[CFG.fld.endActual]=ch.end; }
+  return body;
+}
+function commit(){
+  $("btnCommit").disabled=true; $("log").innerHTML="";
+  if(!$("setTimes").checked) log("Hinweis: ohne Terminierung erscheinen die Teile evtl. nicht auf der Plantafel.","info");
+  var n=S.chunks.length, done=0, fail=0;
+  function finalize(){ if(done+fail<n) return; log(fail?("Fertig mit "+fail+" Fehler(n).") :("Alle "+done+" Teile angelegt. Plantafel ggf. aktualisieren."), fail?"err":"ok"); if(S.live&&S.sdk){ try{ S.sdk.emit(S.EV.Version1.RELOAD_CONTEXT,{}); }catch(e){} } }
+
+  if(!S.live){
+    S.chunks.forEach(function(ch,i){ var who=(S.technicians.find(function(t){return t.id===ch.techId;})||{}).name||"?"; done++; log("Demo: Teil "+(i+1)+"/"+n+" · "+fmtH(ch.hours)+" h → "+who+(ch.start?(" ("+fmtDate(ch.start)+")"):""),"ok"); finalize(); });
+    return;
+  }
+  resolveVersion("Activity").then(function(v){
+    var dto="Activity."+v;
+    S.chunks.forEach(function(ch,i){
+      var who=(S.technicians.find(function(t){return t.id===ch.techId;})||{}).name||"?";
+      var body=buildBody(ch,i,n);
+      authedFetch(base()+"/Activity"+qp(dto),{method:"POST",body:JSON.stringify(body)})
+        .then(check("POST")).then(function(){ done++; log("Angelegt: Teil "+(i+1)+"/"+n+" · "+fmtH(ch.hours)+" h → "+who+(ch.start?(" ("+fmtDate(ch.start)+")"):""),"ok"); return readback(body.id,dto,who); })
+        .catch(function(e){ fail++; log("Fehler Teil "+(i+1)+"/"+n+": "+e.message,"err"); })
+        .finally(finalize);
+    });
+  }).catch(function(e){ log("Abbruch: "+e.message,"err"); $("btnCommit").disabled=false; });
+}
+function readback(id,dto,who){
+  return authedFetch(base()+"/Activity/"+id+qp(dto)).then(function(r){ return r.ok?r.json():null; }).then(function(res){
+    if(!res) return; var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
+    var resp=a[CFG.fld.responsibles];
+    log("↳ FSM gespeichert: type="+(a.type||"—")+", status="+(a[CFG.fld.status]||"—")+", code="+(a.code||"—")+", object="+(a.object?"ja":"NEIN")+", stage="+(a[CFG.fld.stage]||"—")+", Verantwortl. "+((resp&&resp.length)?resp.length:"0"),(a.type&&a[CFG.fld.status]&&a.code&&a.object)?"ok":"err");
+  }).catch(function(){});
+}
+function log(msg,cls){ var r=el("div","row "+(cls||"")); r.textContent=msg; $("log").appendChild(r); $("log").scrollTop=$("log").scrollHeight; }
+
+/* ---------- Demo ---------- */
+function demoTech(){ return [{id:"t1",name:"Walter Berger"},{id:"t2",name:"Claudia Wagner"},{id:"t3",name:"Klaus-Peter Schulz"},{id:"t4",name:"Silke Fischer"},{id:"t5",name:"Bruno Moser"}].map(function(t,i){t.color=TECH_COLORS[i%TECH_COLORS.length];return t;}); }
+function demoOps(){ return [{id:"demo-1",subject:"Große Wartung – Drehleiter L32",hours:300},{id:"demo-2",subject:"Pumpenrevision – TLF 4000",hours:120},{id:"demo-3",subject:"Elektrik-Nachrüstung – HLF 20",hours:90}]; }
+
+/* ---------- Events ---------- */
+$("btnRefresh").addEventListener("click",function(){ if(S.live){ requestContext(); log("Auswahl/Token angefordert.","info"); } });
+$("btnLoadOps").addEventListener("click",loadBoardData);
+$("btnLoadTech").addEventListener("click",loadBoardData);
+$("btnDemo").addEventListener("click",function(){ S.operations=demoOps(); renderOps(); if(!S.technicians.length){S.technicians=demoTech();renderTech();} });
+$("btnLoadId").addEventListener("click",function(){ var id=$("opId").value.trim(); if(id) loadActivityById(id,true); });
+$("btnAll").addEventListener("click",function(){ S.technicians.forEach(function(t){S.selectedTech[t.id]=true;}); renderTech(); });
+$("mode").addEventListener("change",function(){ var b=$("mode").value==="block"; $("blockH").hidden=!b; $("blockUnit").hidden=!b; });
+$("setTimes").addEventListener("change",renderChunks);
+$("startDate").addEventListener("change",renderChunks);
+$("btnSplit").addEventListener("click",doSplit);
+$("btnAuto").addEventListener("click",autoAssign);
+$("btnReset").addEventListener("click",function(){ S.current=null; S.chunks=[]; $("dz").className="dz"; $("dz").innerHTML='Vorgang hierher ziehen<br><span style="font-size:11px;">oder in der Liste links anklicken</span>'; $("cfg").hidden=true; $("log").innerHTML=""; });
+$("btnCommit").addEventListener("click",commit);
+
+(function initDate(){ var d=new Date(); function p(n){return(n<10?"0":"")+n;} $("startDate").value=d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate()); })();
+initDropzone(); debug("(noch kein Kontext)");
+fetch("./config.json").then(function(r){return r.ok?r.json():{};}).then(function(c){ if(c&&c.backendUrl!=null) BACKEND=c.backendUrl; }).catch(function(){}).then(connect);
+})();
+</script>
 </body>
 </html>

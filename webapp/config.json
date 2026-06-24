@@ -1,6 +1,4 @@
 {
-  "activityDtoVersion": "40",
-  "personDtoVersion": "26",
-  "clientId": "evosplit",
-  "_comment": "If a create fails with a version error, or the technician/activity lists stay empty, set the current Activity/Person DTO versions from the FSM API/Query workbench here."
+  "backendUrl": "https://evosplit-proxy.YOUR-SUBDOMAIN.workers.dev",
+  "_comment": "Set this to your Cloudflare Worker URL. Leave '' only if the UI is served from the same origin as the proxy. The UI calls backendUrl + '/fsm/...'."
 }
