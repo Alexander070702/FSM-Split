@@ -83,8 +83,8 @@
           <input id="startDate" type="date"/>
           <span class="hint">08–16 Uhr, Wochenende übersprungen</span>
         </div>
-        <div class="cfg"><label>Status beim Anlegen</label>
-          <select id="commitStage"><option value="">Wie Originalvorgang (empfohlen)</option><option value="DISPATCHING">Dispatch-Pool (DISPATCHING)</option></select></div>
+        <div class="cfg"><label>executionStage beim Anlegen</label>
+          <input id="commitStage" type="text" placeholder="leer = wie Quelle"/></div>
         <button id="btnSplit" class="primary">Aufteilen, terminieren &amp; zuweisen</button>
         <div id="chunks" class="chunks"></div>
         <div id="sumline" class="sumline"></div>
@@ -123,7 +123,7 @@ var CFG = {
         object:"object", businessPartner:"businessPartner", location:"location",
         start:"earliestStartDateTime", end:"dueDateTime", startActual:"startDateTime", endActual:"endDateTime", stage:"executionStage", status:"status" },
   // Vom Originalvorgang zu übernehmende Verknüpfungsfelder (für Plantafel-Sichtbarkeit/Auftrag):
-  copyFromSource:["serviceCall","object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope"],
+  copyFromSource:["serviceCall","object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope","status","executionStage"],
   assignedStage:"DISPATCHED", workdayStart:8, workdayHours:8,
   qTechnicians:"SELECT p.id, p.firstName, p.lastName FROM Person p",
   qOpenOps:"SELECT a.id, a.subject, a.durationInMinutes FROM Activity a"
@@ -306,7 +306,12 @@ function setCurrent(op){
   var warn = op.raw ? (op.raw.object ? "" : " · (KEIN Auftragsbezug – Splits erscheinen NICHT auf der Tafel)") : " · (nur Eckdaten – per Anwahl/ID laden)";
   dz.innerHTML='<div class="opcard"><div class="t">'+esc(op.subject)+'</div><div class="m">'+fmtH(op.hours)+' h gesamt · '+esc(op.id)+warn+'</div></div>';
   $("cfg").hidden=false;
-  if(op.raw) log("Quelle „"+(op.subject||op.id)+"“: stage="+(op.raw.executionStage||"—")+" · status="+(op.raw.status||"—")+" · type="+(op.raw.type||"—")+" · code="+(op.raw.code||"—")+" — diese Planungsstufe übernehmen die Teile.","info");
+  if(op.raw){
+    var st=op.raw.executionStage||"", stt=op.raw.status||"";
+    var ce=document.getElementById("commitStage"); if(ce) ce.value=st;
+    log("Quelle „"+(op.subject||op.id)+"“: stage="+(st||"—")+" · status="+(stt||"—")+" · type="+(op.raw.type||"—")+" · code="+(op.raw.code||"—"),"info");
+    if(/^DISPATCHING$/i.test(st)||/^DRAFT$/i.test(stt)) log("Achtung: Diese Vorlage ist selbst unplanmäßig (Pool/Entwurf). Wähle als Vorlage einen Vorgang, der OBEN im Gantt auf einem Techniker liegt – dann steht im Feld die richtige executionStage.","warn");
+  }
   renderChunks(); $("btnCommit").disabled=true;
 }
 function initDropzone(){
@@ -379,16 +384,15 @@ function buildBody(ch,i,n){
   body[CFG.fld.subject]=baseSubject+" – Teil "+(i+1)+"/"+n;
   var mins=Math.round(ch.hours*60);
   body[CFG.fld.duration]=mins; body.plannedDurationInMinutes=mins; body.plannedDurationType="MANUAL";
-  var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value)||"";
+  var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value||"").trim();
   if(ch.techId){
     body[CFG.fld.responsibles]=[ch.techId];
-    // Status + Planungsstufe vom Originalvorgang übernehmen – der ist nachweislich auf der Tafel sichtbar:
-    body[CFG.fld.status]=src[CFG.fld.status]||"OPEN";
-    body[CFG.fld.stage]=forced||src[CFG.fld.stage]||"DISPATCHING";
+    // status + executionStage von der Quelle geerbt (oben kopiert, z.B. RELEASED/Freigegeben); Stufe per Feld überschreibbar:
+    if(forced) body[CFG.fld.stage]=forced;
   } else {
     body[CFG.fld.responsibles]=[];
-    body[CFG.fld.status]=src[CFG.fld.status]||"OPEN";
-    body[CFG.fld.stage]="DISPATCHING";
+    body[CFG.fld.status]="OPEN";
+    body[CFG.fld.stage]=forced||"DISPATCHING";
   }
   if(ch.start){ body[CFG.fld.start]=ch.start; body[CFG.fld.end]=ch.end; body[CFG.fld.startActual]=ch.start; body[CFG.fld.endActual]=ch.end; }
   return body;
