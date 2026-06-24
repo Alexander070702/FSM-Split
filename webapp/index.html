@@ -85,6 +85,7 @@
         </div>
         <div class="cfg"><label>executionStage beim Anlegen</label>
           <input id="commitStage" type="text" placeholder="leer = wie Quelle"/></div>
+        <div class="cfg"><label><input type="checkbox" id="demoNoErp"/> Demo-Modus: ohne Auftragsbezug anlegen (ERP-frei, erscheint frei am Board)</label></div>
         <button id="btnSplit" class="primary">Aufteilen, terminieren &amp; zuweisen</button>
         <div id="chunks" class="chunks"></div>
         <div id="sumline" class="sumline"></div>
@@ -377,7 +378,9 @@ function renderChunks(){
 /* ---------- Anlage ---------- */
 function buildBody(ch,i,n){
   var src=(S.current&&S.current.raw)||{}; var body={};
-  CFG.copyFromSource.forEach(function(f){ if(src[f]!=null) body[f]=src[f]; });
+  var demoNoErp=!!(document.getElementById("demoNoErp")||{}).checked;
+  var skip = demoNoErp ? {object:1,scope:1,serviceCall:1} : {};
+  CFG.copyFromSource.forEach(function(f){ if(src[f]!=null && !skip[f]) body[f]=src[f]; });
   body.id=uuid();
   body.type=src.type||"ASSIGNMENT";
   var baseSubject=(S.current.subject||"Vorgang").split(" – Teil ")[0];
@@ -423,9 +426,12 @@ function commit(){
 }
 function readback(id,dto,who){
   return authedFetch(base()+"/Activity/"+id+qp(dto)).then(function(r){ return r.ok?r.json():null; }).then(function(res){
-    if(!res) return; var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
+    if(!res){ log("↳ Readback: Vorgang "+id+" nicht mehr lesbar – evtl. vom ERP-Connector verworfen.","err"); return; }
+    var a=(res.data&&res.data[0]&&res.data[0].activity)||res.activity||res;
     var resp=a[CFG.fld.responsibles];
-    log("↳ FSM gespeichert: type="+(a.type||"—")+", status="+(a[CFG.fld.status]||"—")+", code="+(a.code||"—")+", object="+(a.object?"ja":"NEIN")+", stage="+(a[CFG.fld.stage]||"—")+", Verantwortl. "+((resp&&resp.length)?resp.length:"0"),(a.type&&a[CFG.fld.status]&&a.code&&a.object)?"ok":"err");
+    var demoNoErp=!!(document.getElementById("demoNoErp")||{}).checked;
+    var ok=!!(a.type && a[CFG.fld.stage] && resp && resp.length && (demoNoErp || a.object));
+    log("↳ FSM gespeichert: status="+(a[CFG.fld.status]||"—")+", stage="+(a[CFG.fld.stage]||"—")+", syncStatus="+(a.syncStatus||"—")+", code="+(a.code||"—")+", object="+(a.object?"ja":"NEIN")+", Verantwortl. "+((resp&&resp.length)?resp.length:"0"), ok?"ok":"err");
   }).catch(function(){});
 }
 function log(msg,cls){ var r=el("div","row "+(cls||"")); r.textContent=msg; $("log").appendChild(r); $("log").scrollTop=$("log").scrollHeight; }
