@@ -308,7 +308,7 @@ function setCurrent(op){
   $("cfg").hidden=false;
   if(op.raw){
     var st=op.raw.executionStage||"", stt=op.raw.status||"";
-    var ce=document.getElementById("commitStage"); if(ce) ce.value=st;
+    var ce=document.getElementById("commitStage"); if(ce) ce.value=(st && !/^DISPATCHING$/i.test(st))?st:"EXECUTION";
     log("Quelle „"+(op.subject||op.id)+"“: stage="+(st||"—")+" · status="+(stt||"—")+" · type="+(op.raw.type||"—")+" · code="+(op.raw.code||"—"),"info");
     if(/^DISPATCHING$/i.test(st)||/^DRAFT$/i.test(stt)) log("Achtung: Diese Vorlage ist selbst unplanmäßig (Pool/Entwurf). Wähle als Vorlage einen Vorgang, der OBEN im Gantt auf einem Techniker liegt – dann steht im Feld die richtige executionStage.","warn");
   }
@@ -387,8 +387,10 @@ function buildBody(ch,i,n){
   var stgEl=document.getElementById("commitStage"); var forced=(stgEl&&stgEl.value||"").trim();
   if(ch.techId){
     body[CFG.fld.responsibles]=[ch.techId];
-    // status + executionStage von der Quelle geerbt (oben kopiert, z.B. RELEASED/Freigegeben); Stufe per Feld überschreibbar:
-    if(forced) body[CFG.fld.stage]=forced;
+    var s=forced||src[CFG.fld.stage]||"EXECUTION";
+    if(!forced && /^DISPATCHING$/i.test(s)) s="EXECUTION";   // zugewiesene Teile gehören auf den Gantt, nicht in den Pool
+    body[CFG.fld.stage]=s;
+    if(body[CFG.fld.status]==null) body[CFG.fld.status]="OPEN";
   } else {
     body[CFG.fld.responsibles]=[];
     body[CFG.fld.status]="OPEN";
