@@ -123,7 +123,7 @@ var CFG = {
         object:"object", businessPartner:"businessPartner", location:"location",
         start:"earliestStartDateTime", end:"dueDateTime", startActual:"startDateTime", endActual:"endDateTime", stage:"executionStage", status:"status" },
   // Vom Originalvorgang zu übernehmende Verknüpfungsfelder (für Plantafel-Sichtbarkeit/Auftrag):
-  copyFromSource:["object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope"],
+  copyFromSource:["serviceCall","object","businessPartner","location","branches","udfValues","type","subType","equipment","contact","address","scope"],
   assignedStage:"DISPATCHED", workdayStart:8, workdayHours:8,
   qTechnicians:"SELECT p.id, p.firstName, p.lastName FROM Person p",
   qOpenOps:"SELECT a.id, a.subject, a.durationInMinutes FROM Activity a"
@@ -146,14 +146,15 @@ function fmtDate(iso){ if(!iso)return""; var d=new Date(iso); function p(n){retu
 
 /* ---------- Shell Handshake ---------- */
 function connect(){
-  if(window.__sdkFailed||typeof FSMShell==="undefined"){ goLive(); return; }
+  if(window.__sdkFailed||typeof FSMShell==="undefined"){ if(usingProxy()) goLive(); else enterDemo("SDK nicht geladen"); return; }
   var ShellSdk=FSMShell.ShellSdk, EV=FSMShell.SHELL_EVENTS;
-  if(!ShellSdk.isInsideShell()){ goLive(); return; }
-  var sdk; try{ sdk=ShellSdk.init(parent,"*"); }catch(e){ try{ sdk=ShellSdk.init(parent); }catch(e2){ goLive(); return; } }
+  if(!ShellSdk.isInsideShell()){ if(usingProxy()) goLive(); else enterDemo("nicht in FSM eingebettet"); return; }
+  var sdk; try{ sdk=ShellSdk.init(parent,"*"); }catch(e){ try{ sdk=ShellSdk.init(parent); }catch(e2){ if(usingProxy()) goLive(); else enterDemo("Shell-Init fehlgeschlagen"); return; } }
   S.sdk=sdk; S.EV=EV;
   sdk.on(EV.Version1.REQUIRE_CONTEXT,function(ev){
     var c=parseMaybe(ev); debug(c);
     S.cloudHost=c.cloudHost||S.cloudHost; S.account=c.account||S.account; S.company=c.company||S.company;
+    if(c.auth&&c.auth.access_token) S.token=c.auth.access_token;
     var vs=parseMaybe(c.viewState||{});
     var sel=(c.selectedActivities&&c.selectedActivities[0])||c.selectedActivityId||c.activityId||(vs&&(vs.activityId||vs.selectedActivityId||(vs.selectedSidebar&&vs.selectedSidebar.id)||vs.id))||null;
     if(!sel){ var mm=(location.search+location.hash).match(/(?:activityId|activity|id)=([0-9a-fA-F-]{8,})/); if(mm) sel=mm[1]; }
@@ -178,11 +179,15 @@ function requestContext(){
 var handshakeDone=false;
 function goLive(){
   if(handshakeDone) return; handshakeDone=true; S.live=true;
-  setBadge("Verbunden über Backend"+(S.account?(" · "+S.account+" / "+S.company):""),"ok");
+  setBadge((usingProxy()?"Verbunden über Proxy":"Verbunden (direkt)")+(S.account?(" · "+S.account+" / "+S.company):""),"ok");
   loadBoardData();
   if(S.selectedId) loadActivityById(S.selectedId,true);
 }
-function afterHandshake(){ goLive(); }
+function afterHandshake(){
+  if(usingProxy()){ goLive(); return; }
+  if(S.token&&S.cloudHost&&S.account&&S.company){ goLive(); }
+  else if(!handshakeDone){ setBadge("Warte auf Kontext/Token…","warn"); }
+}
 function enterDemo(reason){
   S.live=false; handshakeDone=true; setBadge("Demo-Modus ("+reason+")","warn"); debug("Demo-Modus: "+reason);
   S.technicians=demoTech(); renderTech(); S.operations=demoOps(); renderOps();
@@ -190,10 +195,11 @@ function enterDemo(reason){
 function refreshToken(){ return new Promise(function(res){ S.authWaiters.push(res); try{ S.sdk.emit(S.EV.Version1.REQUIRE_AUTHENTICATION,{response_type:"token"}); }catch(e){ res(S.token); } setTimeout(function(){ res(S.token); },4000); }); }
 
 /* ---------- API ---------- */
-function base(){return BACKEND+"/fsm/data/v4";}
-function qbase(){return BACKEND+"/fsm/query/v1";}
+function usingProxy(){ return !!(BACKEND && BACKEND.length); }
+function base(){ return usingProxy() ? (BACKEND+"/fsm/data/v4") : ("https://"+S.cloudHost+"/api/data/v4"); }
+function qbase(){ return usingProxy() ? (BACKEND+"/fsm/query/v1") : ("https://"+S.cloudHost+"/api/query/v1"); }
 function qp(dto){return "?account="+encodeURIComponent(S.account)+"&company="+encodeURIComponent(S.company)+(dto?("&dtos="+encodeURIComponent(dto)):"");}
-function hdr(){return {"Content-Type":"application/json","Accept":"application/json","X-Client-Id":CFG.clientIdentifier,"X-Client-Version":CFG.clientVersion};}
+function hdr(){var h={"Content-Type":"application/json","Accept":"application/json","X-Client-Id":CFG.clientIdentifier,"X-Client-Version":CFG.clientVersion}; if(!usingProxy()&&S.token) h["Authorization"]="Bearer "+S.token; return h;}
 function check(label){return function(r){ if(r.ok) return r; return r.text().then(function(b){ throw new Error(label+" "+r.status+(b?(": "+b.replace(/\s+/g," ").slice(0,500)):"")); }); };}
 function uuid(){return "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==="x"?r:(r&0x3|0x8);return v.toString(16);});}
 function authedFetch(url,opts){ opts=opts||{}; opts.headers=hdr(); return fetch(url,opts).then(function(r){ if(r.status!==401) return r; return refreshToken().then(function(){ opts.headers=hdr(); return fetch(url,opts); }); }); }

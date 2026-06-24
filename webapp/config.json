@@ -1,4 +1,4 @@
 {
-  "backendUrl": "https://evosplit-proxy.YOUR-SUBDOMAIN.workers.dev",
-  "_comment": "Set this to your Cloudflare Worker URL. Leave '' only if the UI is served from the same origin as the proxy. The UI calls backendUrl + '/fsm/...'."
+  "backendUrl": "",
+  "_comment": "LEAVE EMPTY for direct mode: the UI talks to FSM directly from the browser (reads work; create works only if your FSM user may create activities). If creating activities fails with 403/CORS, deploy the Cloudflare Worker (see README), then put its URL here, e.g. https://evosplit-proxy.NAME.workers.dev — then ALL calls go through the worker with a privileged service client."
 }
